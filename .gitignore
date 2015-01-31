@@ -1,0 +1,13 @@
+.svn
+.DS_Store
+._*
+.LSOverride
+*~
+*.suo
+*.ncb
+*.perspectivev3
+*.pbxuser
+*.xcuserstate
+*.o
+*.app
+AutoDJ

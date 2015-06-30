@@ -44,6 +44,7 @@ public:
 	Sound_Sample *Sample;
 	double CurrentFrame, MaxFrame, FirstBeatFrame, FirstOutroFrame;
 	int IntroBeats, OutroBeats;
+	std::map<size_t,double> Beats;
 	
 	Song( std::string filename, Sound_AudioInfo *info )
 	{
@@ -54,17 +55,24 @@ public:
 			
 			// For simplicity's sake, assume it's always 16-bit audio.
 			MaxFrame = Sample->buffer_size / (2 * Sample->actual.channels);
+			
+			if( MaxFrame < 0.5 )
+			{
+				Sound_FreeSample( Sample );
+				Sample = NULL;
+				printf( "%s: zero-length\n", filename.c_str() );
+			}
 		}
 		else
 		{
 			MaxFrame = 0.;
-			printf( "%s\n", Sound_GetError() );
+			printf( "%s: %s\n", filename.c_str(), Sound_GetError() );
 		}
 		
 		CurrentFrame = 0.;
 		BPM = 140.;
 		FirstBeatFrame = 0.;
-		IntroBeats = 96;
+		IntroBeats = 0;
 		OutroBeats = 0;
 		FirstOutroFrame = 0.;
 	}
@@ -82,16 +90,6 @@ public:
 			FirstBeatFrame = Sample->actual.rate * ((60. * minutes) + seconds);
 		else
 			FirstBeatFrame = 0.;
-	}
-	
-	void StartIntroAtBeat( double beat )
-	{
-		FirstBeatFrame = FrameAtBeat( beat );
-	}
-	
-	void StartOutroAtBeat( double beat )
-	{
-		FirstOutroFrame = FrameAtBeat( beat );
 	}
 	
 	double InterpolatedFrame( Uint8 channel ) const
@@ -162,6 +160,62 @@ public:
 			return beat * (60. * Sample->actual.rate) / BPM + FirstBeatFrame;
 		else
 			return 0.;
+	}
+	
+	double NearestBeatFrameAtFrame( double frame )
+	{
+		std::map<size_t,double>::iterator exact_beat_found = Beats.find( (size_t)( frame + 0.5 ) );
+		if( exact_beat_found != Beats.end() )
+		{
+			// We found an exact match.
+			
+			return exact_beat_found->first;
+		}
+		else
+		{
+			// No exact match, check for beats near where we guessed.
+			
+			Beats[ frame ] = 0.;
+			std::map<size_t,double>::iterator temp = Beats.find( frame );
+			std::map<size_t,double>::iterator ahead = temp;
+			ahead ++;
+			std::map<size_t,double>::reverse_iterator behind(temp);
+			behind ++;
+			
+			double nearest_beat = 0.;
+			double off_by = FLT_MAX;
+			
+			if( behind != Beats.rend() )
+			{
+				nearest_beat = behind->first;
+				off_by = frame - nearest_beat;
+			}
+			
+			if( (ahead != Beats.end()) && ((ahead->first - frame) < off_by) )
+			{
+				nearest_beat = ahead->first;
+				off_by = ahead->first - frame;
+			}
+			
+			Beats.erase( temp );
+			
+			return nearest_beat;
+		}
+	}
+	
+	double NearestBeatFrameAtBeat( double beat )
+	{
+		return NearestBeatFrameAtFrame( FrameAtBeat( beat ) );
+	}
+	
+	double NearestBeatAtFrame( double frame )
+	{
+		return BeatAtFrame( NearestBeatFrameAtFrame( frame ) );
+	}
+	
+	double NearestBeatAtBeat( double beat )
+	{
+		return BeatAtFrame( NearestBeatFrameAtBeat( beat ) );
 	}
 	
 	void Analyze( void )
@@ -251,23 +305,22 @@ public:
 			// Look for significant increases in peak averages (bass hits).
 			
 			double min_value = highest / 8., min_inc_factor = 128.;
-			std::map<size_t,double> beats;
 			prev = 0.;
-			beats.clear();
+			Beats.clear();
 			bool prev_adjacent = false;
 			
 			for( std::map<size_t,double>::iterator avg_iter = avg_peak.begin(); avg_iter != avg_peak.end(); avg_iter ++ )
 			{
 				if( prev_adjacent && (avg_iter->second > prev) )
 				{
-					std::map<size_t,double>::iterator last = beats.end();
+					std::map<size_t,double>::iterator last = Beats.end();
 					last --;
-					beats.erase( last );
-					beats[ avg_iter->first ] = avg_iter->second;
+					Beats.erase( last );
+					Beats[ avg_iter->first ] = avg_iter->second;
 				}
 				else if( (avg_iter->second >= min_value) && (avg_iter->second > prev * min_inc_factor) )
 				{
-					beats[ avg_iter->first ] = avg_iter->second;
+					Beats[ avg_iter->first ] = avg_iter->second;
 					prev_adjacent = true;
 				}
 				else
@@ -295,7 +348,7 @@ public:
 				size_t first_beat_matched = 0;
 				
 				// Try a few different starting points.
-				for( std::map<size_t,double>::iterator beat_iter = beats.begin(); (beat_iter != beats.end()) && (beat_iter->first < max_analysis_frame / 2); beat_iter ++ )
+				for( std::map<size_t,double>::iterator beat_iter = Beats.begin(); (beat_iter != Beats.end()) && (beat_iter->first < max_analysis_frame / 2); beat_iter ++ )
 				{
 					size_t start = beat_iter->first;
 					std::vector<int> doff_behind, doff_ahead;
@@ -305,8 +358,8 @@ public:
 					// Look at each place we expect the beat to hit.
 					for( size_t frame = start; frame < max_analysis_frame; frame += frame_skip )
 					{
-						std::map<size_t,double>::iterator exact_beat_found = beats.find( frame );
-						if( exact_beat_found != beats.end() )
+						std::map<size_t,double>::iterator exact_beat_found = Beats.find( frame );
+						if( exact_beat_found != Beats.end() )
 						{
 							// We found an exact match.
 						
@@ -325,14 +378,14 @@ public:
 						{
 							// No exact match, check for beats near where we guessed.
 							
-							beats[ frame ] = 0.;
-							std::map<size_t,double>::iterator temp = beats.find( frame );
+							Beats[ frame ] = 0.;
+							std::map<size_t,double>::iterator temp = Beats.find( frame );
 							std::map<size_t,double>::iterator ahead = temp;
 							ahead ++;
 							std::map<size_t,double>::reverse_iterator behind(temp);
 							behind ++;
 							
-							if( (behind != beats.rend()) && (frame - behind->first < frame_skip / 2) )
+							if( (behind != Beats.rend()) && (frame - behind->first < frame_skip / 2) )
 							{
 								int off = behind->first - frame;
 								
@@ -346,7 +399,7 @@ public:
 							else
 								misses_behind ++;
 							
-							if( (ahead != beats.end()) && (ahead->first - frame < frame_skip / 2) )
+							if( (ahead != Beats.end()) && (ahead->first - frame < frame_skip / 2) )
 							{
 								int off = ahead->first - frame;
 								
@@ -360,7 +413,7 @@ public:
 							else
 								misses_ahead ++;
 							
-							beats.erase( temp );
+							Beats.erase( temp );
 						}
 						
 						// Assume the first beat of the first detected pair is the first real beat.
@@ -442,7 +495,7 @@ public:
 			
 			
 			// If it's close, round to the nearest whole BPM.
-			double bpm_rounding = 0.039;
+			double bpm_rounding = 0.106;
 			double bpm_fpart = modf( 44100. * 60. / (double) best_frame_skip, &BPM );
 			if( bpm_fpart >= (1. - bpm_rounding) )
 				BPM += 1.;
@@ -489,7 +542,7 @@ public:
 	bool Repeat;
 	bool Metronome;
 	PlaybackBuffer Buffer;
-	int LoadTimeoutSecs;
+	time_t LoadTimeoutSecs;
 	FILE *WriteTo;
 	size_t WroteBytes;
 	std::deque<std::string> Queue;
@@ -508,7 +561,7 @@ public:
 		Repeat = true;
 		Metronome = false;
 		Buffer.SetSize( 131072 );
-		LoadTimeoutSecs = 60;
+		LoadTimeoutSecs = 120;
 		WriteTo = NULL;
 		WroteBytes = 0;
 	}
@@ -525,7 +578,7 @@ public:
 	
 	void CheckThreads( void )
 	{
-		size_t now_secs = time(NULL);
+		time_t now_secs = time(NULL);
 		
 		for( std::map<SDL_Thread*,SongLoadData*>::iterator thread_iter = LoadThreads.begin(); thread_iter != LoadThreads.end(); thread_iter ++ )
 		{
@@ -570,6 +623,9 @@ public:
 			{
 				// We gave it some time to try loading, so if it's not done yet, kill it.
 				// This is because SDL_sound can get stuck when loading certain songs.
+				
+				printf( "%s: Loading Timeout\n", thread_iter->second->Filename.c_str() );
+				fflush( stdout );
 				
 				SDL_KillThread( thread_iter->first );
 				
@@ -657,6 +713,9 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	// For simplicity's sake, assume it's always 16-bit audio.
 	Sint16 *stream16 = (Sint16*) stream;
 	
+	bool crossfade_now = false;
+	double crossfade = 0.;
+	
 	if( ud->Songs.size() )
 	{
 		Song *current_song = ud->Songs.front();
@@ -668,37 +727,41 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		{
 			// Check for crossfade into second song.
 			
-			bool crossfade_now = false;
-			double crossfade = 0.;
+			// FIXME: Could save some math per sample by checking if these have been set already.
+			crossfade_now = false;
+			crossfade = 0.;
 			
 			if( next_song )
 			{
-				// See if we should be crossfading now because of first track ending.
-				if( current_song->OutroBeats )
-				{
-					if( current_song->CurrentFrame >= current_song->FirstOutroFrame )
-					{
-						crossfade_now = true;
-						
-						crossfade = (current_song->Beat() - current_song->FirstOutroBeat()) / current_song->OutroBeats;
-						if( crossfade > 1. )
-							crossfade = 1.;
-						else if( crossfade < 0. )
-							crossfade = 0.;
-					}
-				}
+				double current_total_beats = current_song->TotalBeats();
 				
-				// See if we should be crossfading now because of next track beginning.
-				// Asssume 4/4 time and line up accordingly.
-				else if( current_song->TotalBeats() / 4. - ((int)( current_song->Beat() )) / 4 < (next_song->IntroBeats / 4) )
+				// Default to 64 beats for crossfade, but allow override from the songs.
+				double crossfade_for_beats = 96.;
+				if( current_song->OutroBeats && next_song->IntroBeats )
+					crossfade_for_beats = std::min<int>( current_song->OutroBeats, next_song->IntroBeats );
+				else if( current_song->OutroBeats )
+					crossfade_for_beats = current_song->OutroBeats;
+				else if( next_song->IntroBeats )
+					crossfade_for_beats = next_song->IntroBeats;
+				
+				// If FirstOutroFrame is not specified, guess a good crossfade point.
+				double crossfade_at_beat = current_total_beats - crossfade_for_beats;
+				if( current_song->FirstOutroFrame )
+					crossfade_at_beat = current_song->BeatAtFrame( current_song->FirstOutroFrame );
+				else
+					crossfade_at_beat = current_song->NearestBeatAtBeat( current_total_beats - fmod( current_total_beats, 16. ) - crossfade_for_beats );
+				
+				// Make sure the current song doesn't end before the cross-fade is complete.
+				if( crossfade_for_beats > current_total_beats - crossfade_at_beat )
+					crossfade_for_beats = current_total_beats - crossfade_at_beat;
+				
+				// Now that we've determined how crossfade should be done, see if we should do it now.
+				if( current_song->Beat() >= crossfade_at_beat )
 				{
 					crossfade_now = true;
-					
-					crossfade = next_song->Beat() / next_song->IntroBeats;
+					crossfade = (current_song->Beat() - crossfade_at_beat) / crossfade_for_beats;
 					if( crossfade > 1. )
 						crossfade = 1.;
-					else if( crossfade < 0. )
-						crossfade = 0.;
 				}
 			}
 			
@@ -775,8 +838,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		}
 	}
 	
-	// Remove tracks that are past their outro if we transitioned into something else.
-	while( (ud->Songs.size() >= 2) && ud->Songs.front()->OutroBeats && (ud->Songs.front()->Beat() > ud->Songs.front()->FirstOutroBeat() + ud->Songs.front()->OutroBeats) )
+	// If we completed a crossfade, remove the song we faded from.
+	if( crossfade_now && (crossfade >= 1.) )
 	{
 		Song *front = ud->Songs.front();
 		ud->Songs.pop_front();
@@ -988,7 +1051,7 @@ int main( int argc, char **argv )
 					{
 						int beat = userdata.Songs.front()->Beat();
 						userdata.Songs.front()->OutroBeats = 64;
-						userdata.Songs.front()->FirstOutroFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) );
+						userdata.Songs.front()->FirstOutroFrame = userdata.Songs.front()->NearestBeatFrameAtBeat( beat - (beat % 16) );
 					}
 					else if( key == SDLK_BACKSLASH )
 						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->MaxFrame;

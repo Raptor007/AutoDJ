@@ -32,7 +32,8 @@ namespace ResampleMethod
 	{
 		Auto = 0,
 		Nearest,
-		Linear
+		Linear,
+		Triangular
 	};
 }
 
@@ -92,15 +93,50 @@ public:
 			FirstBeatFrame = 0.;
 	}
 	
-	double InterpolatedFrame( Uint8 channel ) const
+	double NearestFrame( Uint8 channel ) const
 	{
+#ifdef __GNUC__
+		if(__builtin_expect( !!( Sample && (channel < Sample->actual.channels) ), 1 ))
+#else
 		if( Sample && (channel < Sample->actual.channels) )
+#endif
 		{
 			Sint16 *buffer16 = (Sint16*) Sample->buffer;
 			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
 			size_t b_index = a_index + Sample->actual.channels;
+#ifdef __GNUC__
+			Sint16 a = __builtin_expect( !!( a_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ a_index ] : 0;
+			Sint16 b = __builtin_expect( !!( b_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ b_index ] : 0;
+#else
 			Sint16 a = (a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0;
 			Sint16 b = (b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0;
+#endif
+			double unused = 0.;
+			double b_part = modf( CurrentFrame, &unused );
+			return (b_part >= 0.5) ? b : a;
+		}
+		else
+			return 0.;
+	}
+	
+	double InterpolatedFrame( Uint8 channel ) const
+	{
+#ifdef __GNUC__
+		if(__builtin_expect( !!( Sample && (channel < Sample->actual.channels) ), 1 ))
+#else
+		if( Sample && (channel < Sample->actual.channels) )
+#endif
+		{
+			Sint16 *buffer16 = (Sint16*) Sample->buffer;
+			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
+			size_t b_index = a_index + Sample->actual.channels;
+#ifdef __GNUC__
+			Sint16 a = __builtin_expect( !!( a_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ a_index ] : 0;
+			Sint16 b = __builtin_expect( !!( b_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ b_index ] : 0;
+#else
+			Sint16 a = (a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0;
+			Sint16 b = (b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0;
+#endif
 			double unused = 0.;
 			double b_part = modf( CurrentFrame, &unused );
 			return a * (1 - b_part) + b * b_part;
@@ -109,18 +145,34 @@ public:
 			return 0.;
 	}
 	
-	double NearestFrame( Uint8 channel ) const
+	double TriangularFrame( Uint8 channel ) const
 	{
-		if( Sample && (channel < Sample->actual.channels) )
+#ifdef __GNUC__
+		if(__builtin_expect( !!( (CurrentFrame <= 1.) || (CurrentFrame + 1 >= MaxFrame) ), 0 ))
+			return InterpolatedFrame( channel );
+		else if(__builtin_expect( !!( Sample && (channel < Sample->actual.channels) ), 1 ))
+#else
+		if( CurrentFrame <= 1. )
+			return InterpolatedFrame( channel );
+		else if( Sample && (channel < Sample->actual.channels) )
+#endif
 		{
 			Sint16 *buffer16 = (Sint16*) Sample->buffer;
 			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
 			size_t b_index = a_index + Sample->actual.channels;
-			Sint16 a = (a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0;
-			Sint16 b = (b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0;
+			size_t prev_index = a_index - Sample->actual.channels;
+			size_t next_index = b_index + Sample->actual.channels;
+			double a = buffer16[ a_index ];
+			double b = buffer16[ b_index ];
+			double prev = buffer16[ prev_index ];
+			double next = buffer16[ next_index ];
+			double mid = a + b - (prev / 2.) - (next / 2.);
 			double unused = 0.;
 			double b_part = modf( CurrentFrame, &unused );
-			return (b_part >= 0.5) ? b : a;
+			if( b_part <= 0.5 )
+				return a * (1 - b_part * 2.) + mid * b_part * 2.;
+			else
+				return mid * (1 - (b_part - 0.5) * 2.) + b * (b_part - 0.5) * 2.;
 		}
 		else
 			return 0.;
@@ -557,7 +609,7 @@ public:
 		BPM = 140.;
 		SourceBPM = true;
 		Resample = ResampleMethod::Auto;
-		Volume = 0.5;
+		Volume = 1.;
 		Repeat = true;
 		Metronome = false;
 		Buffer.SetSize( 131072 );
@@ -770,15 +822,20 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			{
 				// Not crossfading yet.
 				
-				if( (ud->Resample != ResampleMethod::Linear) && ((fabs(current_song->BPM - bpm) < 0.5) || (ud->Resample == ResampleMethod::Nearest)) )
+				if( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.5)) )
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 						stream16[ i + channel ] = Finalize( current_song->NearestFrame( channel ) * ud->Volume );
 				}
-				else
+				else if( ud->Resample == ResampleMethod::Linear )
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 						stream16[ i + channel ] = Finalize( current_song->InterpolatedFrame( channel ) * ud->Volume );
+				}
+				else
+				{
+					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
+						stream16[ i + channel ] = Finalize( current_song->TriangularFrame( channel ) * ud->Volume );
 				}
 				
 				current_song->Advance( bpm );
@@ -790,13 +847,22 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				if( ud->SourceBPM )
 					bpm = LinearCrossfade( current_song->BPM, next_song->BPM, crossfade );
 				
-				bool a_nearest = ((ud->Resample != ResampleMethod::Linear) && ((fabs(current_song->BPM - bpm) < 0.5) || (ud->Resample == ResampleMethod::Nearest)));
-				bool b_nearest = ((ud->Resample != ResampleMethod::Linear) && ((fabs(next_song->BPM - bpm) < 0.5) || (ud->Resample == ResampleMethod::Nearest)));
+				bool a_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.5)) );
+				bool b_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(next_song->BPM - bpm) < 0.5)) );
 				
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 				{
-					double a = a_nearest ? current_song->NearestFrame( channel ) : current_song->InterpolatedFrame( channel );
-					double b = b_nearest ? next_song->NearestFrame( channel ) : next_song->InterpolatedFrame( channel );
+					double a, b;
+					if( ud->Resample == ResampleMethod::Linear )
+					{
+						a = current_song->InterpolatedFrame( channel );
+						b = next_song->InterpolatedFrame( channel );
+					}
+					else
+					{
+						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->TriangularFrame( channel );
+						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->TriangularFrame( channel );
+					}
 					
 					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) * ud->Volume );
 				}
@@ -1113,6 +1179,11 @@ int main( int argc, char **argv )
 						{
 							userdata.Resample = ResampleMethod::Linear;
 							printf( "Resample: Linear\n" );
+						}
+						else if( userdata.Resample == ResampleMethod::Linear )
+						{
+							userdata.Resample = ResampleMethod::Triangular;
+							printf( "Resample: Triangular\n" );
 						}
 						else
 						{

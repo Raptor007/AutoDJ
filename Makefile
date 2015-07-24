@@ -1,7 +1,7 @@
 PREFIX = /opt/local
 CC = $(PREFIX)/bin/g++
 O = 2
-CFLAGS = -O$(O) -march=native -mfpmath=sse -fomit-frame-pointer -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wno-narrowing
+CFLAGS = -O$(O) -march=native -mfpmath=sse -fomit-frame-pointer -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing
 INC = $(PREFIX)/include $(PREFIX)/include/SDL
 LIB = libSDLmain.a libSDL_sound.a libSDL.a libspeex.a libmodplug.dylib libmikmod.a libsmpeg.a libflac.a libvorbisfile.a libvorbis.a libogg.a libXrandr.a libXrender.a libXext.a libX11.a libxcb.a libXdmcp.a libXau.a libbz2.a liblzma.a libz.a
 LIBDIR = $(PREFIX)/lib

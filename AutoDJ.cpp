@@ -148,11 +148,11 @@ public:
 	double TriangularFrame( Uint8 channel ) const
 	{
 #ifdef __GNUC__
-		if(__builtin_expect( !!( (CurrentFrame <= 1.) || (CurrentFrame + 1 >= MaxFrame) ), 0 ))
+		if(__builtin_expect( !!( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) ), 0 ))
 			return InterpolatedFrame( channel );
 		else if(__builtin_expect( !!( Sample && (channel < Sample->actual.channels) ), 1 ))
 #else
-		if( CurrentFrame <= 1. )
+		if( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) )
 			return InterpolatedFrame( channel );
 		else if( Sample && (channel < Sample->actual.channels) )
 #endif

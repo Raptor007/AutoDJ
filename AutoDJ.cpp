@@ -25,6 +25,22 @@ void BufferedAudioCallback( void *userdata, Uint8* stream, int len );
 
 int SongLoad( void *data_ptr );
 
+#ifndef likely
+#ifdef __GNUC__
+#define likely(x) (__builtin_expect( !!(x), 1 ))
+#else
+#define likely(x) (x)
+#endif
+#endif
+
+#ifndef unlikely
+#ifdef __GNUC__
+#define unlikely(x) (__builtin_expect( !!(x), 0 ))
+#else
+#define unlikely(x) (x)
+#endif
+#endif
+
 
 namespace ResampleMethod
 {
@@ -33,7 +49,8 @@ namespace ResampleMethod
 		Auto = 0,
 		Nearest,
 		Linear,
-		Triangular
+		Triangular,
+		Quadratic
 	};
 }
 
@@ -59,9 +76,21 @@ public:
 			
 			if( MaxFrame < 0.5 )
 			{
+				printf( "%s: zero-length\n", filename.c_str() );
 				Sound_FreeSample( Sample );
 				Sample = NULL;
-				printf( "%s: zero-length\n", filename.c_str() );
+			}
+			else if( Sample->actual.rate <= 0 )
+			{
+				printf( "%s: rate %i Hz\n", filename.c_str(), (int) Sample->actual.rate );
+				Sound_FreeSample( Sample );
+				Sample = NULL;
+			}
+			else if( MaxFrame / (double) Sample->actual.rate < 30. )
+			{
+				printf( "%s: only %.1f sec long\n", filename.c_str(), MaxFrame / (double) Sample->actual.rate );
+				Sound_FreeSample( Sample );
+				Sample = NULL;
 			}
 		}
 		else
@@ -95,22 +124,13 @@ public:
 	
 	double NearestFrame( Uint8 channel ) const
 	{
-#ifdef __GNUC__
-		if(__builtin_expect( !!( Sample && (channel < Sample->actual.channels) ), 1 ))
-#else
-		if( Sample && (channel < Sample->actual.channels) )
-#endif
+		if(likely( Sample && (channel < Sample->actual.channels) ))
 		{
 			Sint16 *buffer16 = (Sint16*) Sample->buffer;
 			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
 			size_t b_index = a_index + Sample->actual.channels;
-#ifdef __GNUC__
-			Sint16 a = __builtin_expect( !!( a_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ a_index ] : 0;
-			Sint16 b = __builtin_expect( !!( b_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ b_index ] : 0;
-#else
-			Sint16 a = (a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0;
-			Sint16 b = (b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0;
-#endif
+			Sint16 a = likely(a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0;
+			Sint16 b = likely(b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0;
 			double unused = 0.;
 			double b_part = modf( CurrentFrame, &unused );
 			return (b_part >= 0.5) ? b : a;
@@ -119,43 +139,28 @@ public:
 			return 0.;
 	}
 	
-	double InterpolatedFrame( Uint8 channel ) const
+	double LinearFrame( Uint8 channel ) const
 	{
-#ifdef __GNUC__
-		if(__builtin_expect( !!( Sample && (channel < Sample->actual.channels) ), 1 ))
-#else
-		if( Sample && (channel < Sample->actual.channels) )
-#endif
+		if(likely( Sample && (channel < Sample->actual.channels) ))
 		{
 			Sint16 *buffer16 = (Sint16*) Sample->buffer;
 			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
 			size_t b_index = a_index + Sample->actual.channels;
-#ifdef __GNUC__
-			Sint16 a = __builtin_expect( !!( a_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ a_index ] : 0;
-			Sint16 b = __builtin_expect( !!( b_index < Sample->buffer_size / 2 ), 1 ) ? buffer16[ b_index ] : 0;
-#else
-			Sint16 a = (a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0;
-			Sint16 b = (b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0;
-#endif
+			Sint16 a = likely(a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0;
+			Sint16 b = likely(b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0;
 			double unused = 0.;
 			double b_part = modf( CurrentFrame, &unused );
-			return a * (1 - b_part) + b * b_part;
+			return a * (1. - b_part) + b * b_part;
 		}
 		else
 			return 0.;
 	}
 	
-	double TriangularFrame( Uint8 channel ) const
+	double TriangularFrame( Uint8 channel, double sharpening = 0.5 ) const
 	{
-#ifdef __GNUC__
-		if(__builtin_expect( !!( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) ), 0 ))
-			return InterpolatedFrame( channel );
-		else if(__builtin_expect( !!( Sample && (channel < Sample->actual.channels) ), 1 ))
-#else
-		if( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) )
-			return InterpolatedFrame( channel );
-		else if( Sample && (channel < Sample->actual.channels) )
-#endif
+		if(unlikely( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) ))
+			return LinearFrame( channel );
+		else if(likely( Sample && (channel < Sample->actual.channels) ))
 		{
 			Sint16 *buffer16 = (Sint16*) Sample->buffer;
 			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
@@ -166,13 +171,36 @@ public:
 			double b = buffer16[ b_index ];
 			double prev = buffer16[ prev_index ];
 			double next = buffer16[ next_index ];
-			double mid = a + b - (prev / 2.) - (next / 2.);
+			double mid = sharpening * (3. * (a + b) - prev - next) / 4. + (1. - sharpening) * (a + b) / 2.;
 			double unused = 0.;
 			double b_part = modf( CurrentFrame, &unused );
 			if( b_part <= 0.5 )
-				return a * (1 - b_part * 2.) + mid * b_part * 2.;
+				return a * (1. - b_part * 2.) + mid * b_part * 2.;
 			else
-				return mid * (1 - (b_part - 0.5) * 2.) + b * (b_part - 0.5) * 2.;
+				return mid * (1. - (b_part - 0.5) * 2.) + b * (b_part - 0.5) * 2.;
+		}
+		else
+			return 0.;
+	}
+	
+	double QuadraticFrame( Uint8 channel, double sharpening = 0.5 ) const
+	{
+		if(unlikely( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) ))
+			return LinearFrame( channel );
+		else if(likely( Sample && (channel < Sample->actual.channels) ))
+		{
+			Sint16 *buffer16 = (Sint16*) Sample->buffer;
+			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
+			size_t b_index = a_index + Sample->actual.channels;
+			size_t prev_index = a_index - Sample->actual.channels;
+			size_t next_index = b_index + Sample->actual.channels;
+			double a = buffer16[ a_index ];
+			double b = buffer16[ b_index ];
+			double prev = buffer16[ prev_index ];
+			double next = buffer16[ next_index ];
+			double unused = 0.;
+			double b_part = modf( CurrentFrame, &unused );
+			return sharpening * ((a + (a - prev) * b_part) * (1. - b_part) + (b + (b - next) * (1. - b_part)) * b_part) + (1. - sharpening) * LinearFrame( channel );
 		}
 		else
 			return 0.;
@@ -268,6 +296,11 @@ public:
 	double NearestBeatAtBeat( double beat )
 	{
 		return BeatAtFrame( NearestBeatFrameAtBeat( beat ) );
+	}
+	
+	bool Finished( void ) const
+	{
+		return (CurrentFrame >= MaxFrame);
 	}
 	
 	void Analyze( void )
@@ -387,7 +420,6 @@ public:
 			// Search a range of likely BPMs and see how well the beats match.
 			
 			size_t best_frame_skip = Sample->actual.rate * 60 / 140;
-			int best_bpm = 0;
 			size_t best_first_beat = first_beat;
 			double best_error = FLT_MAX;
 			int best_doff = INT_MAX;
@@ -525,7 +557,6 @@ public:
 					// Find the lowest difference between differences for the closest prediction.
 					if( doff_behind.size() && (error_behind < best_error) )
 					{
-						best_bpm = bpm;
 						best_doff = doff_behind[ doff_behind.size() / 2 ];
 						best_frame_skip = frame_skip + best_doff;
 						best_first_beat = first_beat_matched ? first_beat_matched : first_beat;
@@ -533,7 +564,6 @@ public:
 					}
 					if( doff_ahead.size() && (error_ahead < best_error) )
 					{
-						best_bpm = bpm;
 						best_doff = doff_ahead[ doff_ahead.size() / 2 ];
 						best_frame_skip = frame_skip + best_doff;
 						best_first_beat = first_beat_matched ? first_beat_matched : first_beat;
@@ -541,10 +571,6 @@ public:
 					}
 				}
 			}
-			
-			
-			//printf( "Detected: %.2f BPM, Start: %.4f, Error from %i BPM: %.2f\n", 44100. * 60. / (double) best_frame_skip, first_beat / 44100., best_bpm, best_error );
-			
 			
 			// If it's close, round to the nearest whole BPM.
 			double bpm_rounding = 0.106;
@@ -590,6 +616,7 @@ public:
 	double BPM;
 	bool SourceBPM;
 	uint8_t Resample;
+	double Sharpening;
 	double Volume;
 	bool Repeat;
 	bool Metronome;
@@ -609,6 +636,7 @@ public:
 		BPM = 140.;
 		SourceBPM = true;
 		Resample = ResampleMethod::Auto;
+		Sharpening = 0.5;
 		Volume = 1.;
 		Repeat = true;
 		Metronome = false;
@@ -644,21 +672,21 @@ public:
 				// Make sure the song loaded okay.
 				if( thread_iter->second->LoadingSong )
 				{
-					printf( "%s: %.2f BPM, Start: %.4f sec\n", thread_iter->second->Filename.c_str(), thread_iter->second->LoadingSong->BPM, thread_iter->second->LoadingSong->FirstBeatFrame / thread_iter->second->LoadingSong->Sample->actual.rate );
+					printf( "%s: %.2f BPM, Start %.4f sec, Beats %.1f\n", thread_iter->second->Filename.c_str(), thread_iter->second->LoadingSong->BPM, thread_iter->second->LoadingSong->FirstBeatFrame / thread_iter->second->LoadingSong->Sample->actual.rate, thread_iter->second->LoadingSong->TotalBeats() );
 					fflush( stdout );
-				
+					
 					if( thread_iter->second->UD->Repeat )
 						thread_iter->second->UD->Queue.push_back( thread_iter->second->Filename );
-				
+					
 					bool first_song = thread_iter->second->UD->Songs.empty();
-				
+					
 					// Only the first song should play pre-beat lead-in.
 					if( ! first_song )
 						thread_iter->second->LoadingSong->CurrentFrame = thread_iter->second->LoadingSong->FirstBeatFrame;
-				
+					
 					// Done loading and analyzing, so put it in the playback queue.
 					thread_iter->second->UD->Songs.push_back( thread_iter->second->LoadingSong );
-				
+					
 					// Start playback after we load the first one successfully.
 					if( first_song )
 					{
@@ -830,12 +858,17 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				else if( ud->Resample == ResampleMethod::Linear )
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->InterpolatedFrame( channel ) * ud->Volume );
+						stream16[ i + channel ] = Finalize( current_song->LinearFrame( channel ) * ud->Volume );
+				}
+				else if( ud->Resample == ResampleMethod::Triangular )
+				{
+					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
+						stream16[ i + channel ] = Finalize( current_song->TriangularFrame( channel, ud->Sharpening ) * ud->Volume );
 				}
 				else
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->TriangularFrame( channel ) * ud->Volume );
+						stream16[ i + channel ] = Finalize( current_song->QuadraticFrame( channel, ud->Sharpening ) * ud->Volume );
 				}
 				
 				current_song->Advance( bpm );
@@ -855,13 +888,18 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 					double a, b;
 					if( ud->Resample == ResampleMethod::Linear )
 					{
-						a = current_song->InterpolatedFrame( channel );
-						b = next_song->InterpolatedFrame( channel );
+						a = current_song->LinearFrame( channel );
+						b = next_song->LinearFrame( channel );
+					}
+					if( ud->Resample == ResampleMethod::Triangular )
+					{
+						a = current_song->TriangularFrame( channel, ud->Sharpening );
+						b = next_song->TriangularFrame( channel, ud->Sharpening );
 					}
 					else
 					{
-						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->TriangularFrame( channel );
-						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->TriangularFrame( channel );
+						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->QuadraticFrame( channel, ud->Sharpening );
+						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->QuadraticFrame( channel, ud->Sharpening );
 					}
 					
 					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) * ud->Volume );
@@ -869,6 +907,18 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				
 				current_song->Advance( bpm );
 				next_song->Advance( bpm );
+				
+				// If we completed a crossfade, remove the song we faded from.
+				if(unlikely( crossfade >= 1. ))
+				{
+					ud->Songs.pop_front();
+					delete current_song;
+					current_song = next_song;
+					next_song = (ud->Songs.size() >= 2) ? ud->Songs[ 1 ] : NULL;
+					
+					crossfade_now = false;
+					crossfade = 0.;
+				}
 			}
 			
 			
@@ -904,16 +954,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		}
 	}
 	
-	// If we completed a crossfade, remove the song we faded from.
-	if( crossfade_now && (crossfade >= 1.) )
-	{
-		Song *front = ud->Songs.front();
-		ud->Songs.pop_front();
-		delete front;
-	}
-	
 	// Remove tracks that have finished playing.
-	while( ud->Songs.size() && (ud->Songs.front()->CurrentFrame > ud->Songs.front()->MaxFrame) )
+	while( ud->Songs.size() && (ud->Songs.front()->Finished()) )
 	{
 		Song *front = ud->Songs.front();
 		ud->Songs.pop_front();
@@ -1064,7 +1106,7 @@ int main( int argc, char **argv )
 	want.callback = BufferedAudioCallback;
 	want.userdata = &userdata;
 	userdata.Buffer.Callback = AudioCallback;
-	int dev = SDL_OpenAudio( &want, &(userdata.Spec) );
+	SDL_OpenAudio( &want, &(userdata.Spec) );
 	Sound_Init();
 	userdata.Info.format = userdata.Spec.format;
 	userdata.Info.channels = userdata.Spec.channels;
@@ -1133,24 +1175,20 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_COMMA )
 					{
-						if( userdata.SourceBPM )
-						{
+						if( userdata.SourceBPM && userdata.Songs.size() )
 							userdata.BPM = (int)( userdata.Songs.front()->BPM + 0.5 );
-							userdata.SourceBPM = false;
-						}
 						
 						userdata.BPM -= 1.;
+						userdata.SourceBPM = false;
 						printf( "Playback BPM: %.2f\n", userdata.BPM );
 					}
 					else if( key == SDLK_PERIOD )
 					{
-						if( userdata.SourceBPM )
-						{
+						if( userdata.SourceBPM && userdata.Songs.size() )
 							userdata.BPM = (int)( userdata.Songs.front()->BPM + 0.5 );
-							userdata.SourceBPM = false;
-						}
 						
 						userdata.BPM += 1.;
+						userdata.SourceBPM = false;
 						printf( "Playback BPM: %.2f\n", userdata.BPM );
 					}
 					else if( key == SDLK_SLASH )
@@ -1185,11 +1223,26 @@ int main( int argc, char **argv )
 							userdata.Resample = ResampleMethod::Triangular;
 							printf( "Resample: Triangular\n" );
 						}
+						else if( userdata.Resample == ResampleMethod::Triangular )
+						{
+							userdata.Resample = ResampleMethod::Quadratic;
+							printf( "Resample: Quadratic\n" );
+						}
 						else
 						{
 							userdata.Resample = ResampleMethod::Nearest;
 							printf( "Resample: Nearest\n" );
 						}
+					}
+					else if( key == SDLK_z )
+					{
+						userdata.Sharpening -= 0.125;
+						printf( "Interpolation Sharpening: %.1f%%\n", userdata.Sharpening * 100. );
+					}
+					else if( key == SDLK_x )
+					{
+						userdata.Sharpening += 0.125;
+						printf( "Interpolation Sharpening: %.1f%%\n", userdata.Sharpening * 100. );
 					}
 					else if( key == SDLK_q )
 						running = false;
@@ -1230,14 +1283,19 @@ int main( int argc, char **argv )
 	}
 	
 	// Cleanup before quitting.
-	userdata.LoadTimeoutSecs = 0;
+	printf( "Killing threads...\n" );
+	userdata.LoadTimeoutSecs = 1;
 	userdata.CheckThreads();
 	userdata.Queue.clear();
 	userdata.Songs.clear();
 	
 	// Quit SDL.
+	printf( "Closing SDL...\n" );
 	Sound_Quit();
 	SDL_CloseAudio();
 	SDL_Quit();
+	
+	printf( "Done quitting.\n" );
+	
 	return 0;
 }

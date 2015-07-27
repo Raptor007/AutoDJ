@@ -49,8 +49,7 @@ namespace ResampleMethod
 		Auto = 0,
 		Nearest,
 		Linear,
-		Triangular,
-		Quadratic
+		Resampled
 	};
 }
 
@@ -156,34 +155,7 @@ public:
 			return 0.;
 	}
 	
-	double TriangularFrame( Uint8 channel, double sharpening = 0.5 ) const
-	{
-		if(unlikely( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) ))
-			return LinearFrame( channel );
-		else if(likely( Sample && (channel < Sample->actual.channels) ))
-		{
-			Sint16 *buffer16 = (Sint16*) Sample->buffer;
-			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
-			size_t b_index = a_index + Sample->actual.channels;
-			size_t prev_index = a_index - Sample->actual.channels;
-			size_t next_index = b_index + Sample->actual.channels;
-			double a = buffer16[ a_index ];
-			double b = buffer16[ b_index ];
-			double prev = buffer16[ prev_index ];
-			double next = buffer16[ next_index ];
-			double mid = sharpening * (3. * (a + b) - prev - next) / 4. + (1. - sharpening) * (a + b) / 2.;
-			double unused = 0.;
-			double b_part = modf( CurrentFrame, &unused );
-			if( b_part <= 0.5 )
-				return a * (1. - b_part * 2.) + mid * b_part * 2.;
-			else
-				return mid * (1. - (b_part - 0.5) * 2.) + b * (b_part - 0.5) * 2.;
-		}
-		else
-			return 0.;
-	}
-	
-	double QuadraticFrame( Uint8 channel, double sharpening = 0.5 ) const
+	double ResampledFrame( Uint8 channel ) const
 	{
 		if(unlikely( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) ))
 			return LinearFrame( channel );
@@ -200,7 +172,9 @@ public:
 			double next = buffer16[ next_index ];
 			double unused = 0.;
 			double b_part = modf( CurrentFrame, &unused );
-			return sharpening * ((a + (a - prev) * b_part) * (1. - b_part) + (b + (b - next) * (1. - b_part)) * b_part) + (1. - sharpening) * LinearFrame( channel );
+			double along_a_tangent = a + b_part * (b - prev) / 2.;
+			double along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
+			return along_a_tangent * (1. - b_part) + along_b_tangent * b_part;
 		}
 		else
 			return 0.;
@@ -616,7 +590,6 @@ public:
 	double BPM;
 	bool SourceBPM;
 	uint8_t Resample;
-	double Sharpening;
 	double Volume;
 	bool Repeat;
 	bool Metronome;
@@ -636,7 +609,6 @@ public:
 		BPM = 140.;
 		SourceBPM = true;
 		Resample = ResampleMethod::Auto;
-		Sharpening = 0.5;
 		Volume = 1.;
 		Repeat = true;
 		Metronome = false;
@@ -860,15 +832,10 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 						stream16[ i + channel ] = Finalize( current_song->LinearFrame( channel ) * ud->Volume );
 				}
-				else if( ud->Resample == ResampleMethod::Triangular )
-				{
-					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->TriangularFrame( channel, ud->Sharpening ) * ud->Volume );
-				}
 				else
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->QuadraticFrame( channel, ud->Sharpening ) * ud->Volume );
+						stream16[ i + channel ] = Finalize( current_song->ResampledFrame( channel ) * ud->Volume );
 				}
 				
 				current_song->Advance( bpm );
@@ -891,15 +858,10 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 						a = current_song->LinearFrame( channel );
 						b = next_song->LinearFrame( channel );
 					}
-					if( ud->Resample == ResampleMethod::Triangular )
-					{
-						a = current_song->TriangularFrame( channel, ud->Sharpening );
-						b = next_song->TriangularFrame( channel, ud->Sharpening );
-					}
 					else
 					{
-						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->QuadraticFrame( channel, ud->Sharpening );
-						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->QuadraticFrame( channel, ud->Sharpening );
+						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->ResampledFrame( channel );
+						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->ResampledFrame( channel );
 					}
 					
 					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) * ud->Volume );
@@ -1220,29 +1182,14 @@ int main( int argc, char **argv )
 						}
 						else if( userdata.Resample == ResampleMethod::Linear )
 						{
-							userdata.Resample = ResampleMethod::Triangular;
-							printf( "Resample: Triangular\n" );
-						}
-						else if( userdata.Resample == ResampleMethod::Triangular )
-						{
-							userdata.Resample = ResampleMethod::Quadratic;
-							printf( "Resample: Quadratic\n" );
+							userdata.Resample = ResampleMethod::Resampled;
+							printf( "Resample: Resampled\n" );
 						}
 						else
 						{
 							userdata.Resample = ResampleMethod::Nearest;
 							printf( "Resample: Nearest\n" );
 						}
-					}
-					else if( key == SDLK_z )
-					{
-						userdata.Sharpening -= 0.125;
-						printf( "Interpolation Sharpening: %.1f%%\n", userdata.Sharpening * 100. );
-					}
-					else if( key == SDLK_x )
-					{
-						userdata.Sharpening += 0.125;
-						printf( "Interpolation Sharpening: %.1f%%\n", userdata.Sharpening * 100. );
 					}
 					else if( key == SDLK_q )
 						running = false;

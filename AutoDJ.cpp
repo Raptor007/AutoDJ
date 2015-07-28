@@ -174,7 +174,9 @@ public:
 			double b_part = modf( CurrentFrame, &unused );
 			double along_a_tangent = a + b_part * (b - prev) / 2.;
 			double along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
-			return along_a_tangent * (1. - b_part) + along_b_tangent * b_part;
+			double remaining_portion = 1. - b_part * b_part - (1. - b_part) * (1. - b_part);
+			double linear = a + (b - a) * b_part;
+			return along_a_tangent * (1. - b_part) * (1. - b_part) + along_b_tangent * b_part * b_part + linear * remaining_portion;
 		}
 		else
 			return 0.;

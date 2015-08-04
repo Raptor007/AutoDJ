@@ -49,7 +49,7 @@ namespace ResampleMethod
 		Auto = 0,
 		Nearest,
 		Linear,
-		Resampled
+		Cubic
 	};
 }
 
@@ -155,28 +155,42 @@ public:
 			return 0.;
 	}
 	
-	double ResampledFrame( Uint8 channel ) const
+	double CubicFrame( Uint8 channel ) const
 	{
-		if(unlikely( (CurrentFrame <= 1.) || (CurrentFrame + 2. >= MaxFrame) ))
-			return LinearFrame( channel );
-		else if(likely( Sample && (channel < Sample->actual.channels) ))
+		if(likely( Sample && (channel < Sample->actual.channels) ))
 		{
 			Sint16 *buffer16 = (Sint16*) Sample->buffer;
 			size_t a_index = Sample->actual.channels * (size_t) CurrentFrame;
 			size_t b_index = a_index + Sample->actual.channels;
-			size_t prev_index = a_index - Sample->actual.channels;
+			long prev_index = a_index - Sample->actual.channels;
 			size_t next_index = b_index + Sample->actual.channels;
-			double a = buffer16[ a_index ];
-			double b = buffer16[ b_index ];
-			double prev = buffer16[ prev_index ];
-			double next = buffer16[ next_index ];
+			double a = 0., b = 0., prev = 0., next = 0.;
+			if(likely( (prev_index >= 0) && (next_index < Sample->buffer_size / 2) ))
+			{
+				prev = buffer16[ prev_index ];
+				a = buffer16[ a_index ];
+				b = buffer16[ b_index ];
+				next = buffer16[ next_index ];
+			}
+			else
+			{
+				prev = ((prev_index >= 0) && (prev_index < (long)( Sample->buffer_size / 2 ))) ? buffer16[ prev_index ] : 0.;
+				a = (a_index < Sample->buffer_size / 2) ? buffer16[ a_index ] : 0.;
+				b = (b_index < Sample->buffer_size / 2) ? buffer16[ b_index ] : 0.;
+				next = (next_index < Sample->buffer_size / 2) ? buffer16[ next_index ] : 0.;
+			}
 			double unused = 0.;
 			double b_part = modf( CurrentFrame, &unused );
+			/*
 			double along_a_tangent = a + b_part * (b - prev) / 2.;
 			double along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
 			double remaining_portion = 1. - b_part * b_part - (1. - b_part) * (1. - b_part);
 			double linear = a + (b - a) * b_part;
 			return along_a_tangent * (1. - b_part) * (1. - b_part) + along_b_tangent * b_part * b_part + linear * remaining_portion;
+			*/
+			// Paul Breeuwsma came up with a simpler cubic interpolation than mine, so I'm using it.
+			// http://www.paulinternet.nl/?page=bicubic
+			return a + 0.5 * b_part * (b - prev + b_part * (2. * prev - 5. * a + 4. * b - next + b_part * (3. * (a - b) + next - prev)));
 		}
 		else
 			return 0.;
@@ -591,6 +605,7 @@ public:
 	Sound_AudioInfo Info;
 	double BPM;
 	bool SourceBPM;
+	double SourcePitchScale;
 	uint8_t Resample;
 	double Volume;
 	bool Repeat;
@@ -610,6 +625,7 @@ public:
 		memset( &Info, 0, sizeof(Info) );
 		BPM = 140.;
 		SourceBPM = true;
+		SourcePitchScale = 1.;
 		Resample = ResampleMethod::Auto;
 		Volume = 1.;
 		Repeat = true;
@@ -775,7 +791,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		Song *current_song = ud->Songs.front();
 		Song *next_song = (ud->Songs.size() >= 2) ? ud->Songs[ 1 ] : NULL;
 		
-		double bpm = ud->SourceBPM ? current_song->BPM : ud->BPM;
+		double bpm = ud->SourceBPM ? (current_song->BPM * ud->SourcePitchScale) : ud->BPM;
 		
 		for( int i = 0; i < len / 2; i += ud->Spec.channels )
 		{
@@ -837,7 +853,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				else
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->ResampledFrame( channel ) * ud->Volume );
+						stream16[ i + channel ] = Finalize( current_song->CubicFrame( channel ) * ud->Volume );
 				}
 				
 				current_song->Advance( bpm );
@@ -847,7 +863,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				// Crossfading now.
 				
 				if( ud->SourceBPM )
-					bpm = LinearCrossfade( current_song->BPM, next_song->BPM, crossfade );
+					bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
 				
 				bool a_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.5)) );
 				bool b_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(next_song->BPM - bpm) < 0.5)) );
@@ -862,8 +878,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 					}
 					else
 					{
-						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->ResampledFrame( channel );
-						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->ResampledFrame( channel );
+						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->CubicFrame( channel );
+						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->CubicFrame( channel );
 					}
 					
 					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) * ud->Volume );
@@ -1019,6 +1035,11 @@ int main( int argc, char **argv )
 				userdata.BPM = atof( argv[ i ] + strlen("--bpm=") );
 				userdata.SourceBPM = false;
 			}
+			else if( strncasecmp( argv[ i ], "--pitch=", strlen("--pitch=") ) == 0 )
+			{
+				userdata.SourcePitchScale = atof( argv[ i ] + strlen("--pitch=") );
+				userdata.SourceBPM = true;
+			}
 			else if( strncasecmp( argv[ i ], "--volume=", strlen("--volume=") ) == 0 )
 				userdata.Volume = atof( argv[ i ] + strlen("--volume=") );
 			else if( strncasecmp( argv[ i ], "--buffer=", strlen("--buffer=") ) == 0 )
@@ -1158,7 +1179,20 @@ int main( int argc, char **argv )
 					else if( key == SDLK_SLASH )
 					{
 						userdata.SourceBPM = true;
+						userdata.SourcePitchScale = 1.;
 						printf( "Playback BPM: Match Source\n" );
+					}
+					else if( key == SDLK_k )
+					{
+						userdata.SourceBPM = true;
+						userdata.SourcePitchScale /= pow( 2., 1./12. );
+						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
+					}
+					else if( key == SDLK_l )
+					{
+						userdata.SourceBPM = true;
+						userdata.SourcePitchScale *= pow( 2., 1./12. );
+						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
 					}
 					else if( key == SDLK_MINUS )
 					{
@@ -1184,8 +1218,8 @@ int main( int argc, char **argv )
 						}
 						else if( userdata.Resample == ResampleMethod::Linear )
 						{
-							userdata.Resample = ResampleMethod::Resampled;
-							printf( "Resample: Resampled\n" );
+							userdata.Resample = ResampleMethod::Cubic;
+							printf( "Resample: Cubic\n" );
 						}
 						else
 						{

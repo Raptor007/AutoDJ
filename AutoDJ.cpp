@@ -65,6 +65,14 @@ public:
 	
 	Song( std::string filename, Sound_AudioInfo *info )
 	{
+		BPM = 140.;
+		CurrentFrame = 0.;
+		MaxFrame = 0.;
+		FirstBeatFrame = 0.;
+		FirstOutroFrame = 0.;
+		IntroBeats = 0;
+		OutroBeats = 0;
+		
 		Sample = Sound_NewSampleFromFile( filename.c_str(), info, 1024*1024*32 );
 		if( Sample )
 		{
@@ -97,13 +105,6 @@ public:
 			MaxFrame = 0.;
 			printf( "%s: %s\n", filename.c_str(), Sound_GetError() );
 		}
-		
-		CurrentFrame = 0.;
-		BPM = 140.;
-		FirstBeatFrame = 0.;
-		IntroBeats = 0;
-		OutroBeats = 0;
-		FirstOutroFrame = 0.;
 	}
 	
 	virtual ~Song()
@@ -1005,7 +1006,7 @@ int main( int argc, char **argv )
 	if( argc == 1 )
 	{
 		char cmd[ 102400 ] = "";
-		snprintf( cmd, 102400, "\"%s\" ~/Music/iTunes/iTunes\\ Music/*Trance* /Volumes/Media/Music/iTunes/iTunes\\ Music/*Trance* &", argv[ 0 ] );
+		snprintf( cmd, 102400, "\"%s\" ~/Music/iTunes/iTunes\\ Music/*Trance* /Volumes/Media/Music/iTunes/iTunes\\ Music/*Trance* /Volumes/Media/Music/BeatPort\\ AIFF &", argv[ 0 ] );
 		system( cmd );
 		return 0;
 	}
@@ -1130,12 +1131,18 @@ int main( int argc, char **argv )
 			while( SDL_PollEvent( &event ) )
 			{
 				if( event.type == SDL_QUIT )
+				{
 					running = false;
+					SDL_PauseAudio( 1 );
+				}
 				else if( event.type == SDL_KEYDOWN )
 				{
 					Uint8 key = event.key.keysym.sym;
 					if( key == SDLK_SPACE )
+					{
 						userdata.Playing = ! userdata.Playing;
+						SDL_PauseAudio( userdata.Playing ? 0 : 1 );
+					}
 					else if( key == SDLK_m )
 						userdata.Metronome = ! userdata.Metronome;
 					else if( key == SDLK_LEFTBRACKET )
@@ -1228,7 +1235,10 @@ int main( int argc, char **argv )
 						}
 					}
 					else if( key == SDLK_q )
+					{
 						running = false;
+						SDL_PauseAudio( 1 );
+					}
 				}
 			}
 		}
@@ -1267,7 +1277,7 @@ int main( int argc, char **argv )
 	
 	// Cleanup before quitting.
 	printf( "Killing threads...\n" );
-	userdata.LoadTimeoutSecs = 1;
+	userdata.LoadTimeoutSecs = 0;
 	userdata.CheckThreads();
 	userdata.Queue.clear();
 	userdata.Songs.clear();

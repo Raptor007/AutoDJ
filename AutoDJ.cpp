@@ -1,29 +1,40 @@
-#include <SDL/SDL.h>
-#include <SDL/SDL_audio.h>
-#include <SDL/SDL_mixer.h>
+#define __STDC_CONSTANT_MACROS
+#define __STDC_FORMAT_MACROS
+
+#include <stdint.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <cmath>
 #include <climits>
 #include <cfloat>
 #include <ctime>
-#include <stdint.h>
-#include <dirent.h>
-#include <sys/stat.h>
 #include <deque>
 #include <vector>
 #include <map>
 #include <algorithm>
 #include <string>
-#include "PlaybackBuffer.h"
+#include <SDL/SDL.h>
+#include <SDL/SDL_audio.h>
 
+#ifdef USE_SDL_MIXER
+#include <SDL/SDL_mixer.h>
+#endif
+
+#include "AudioFile.h"
+#include "PlaybackBuffer.h"
 
 class Song;
 class SongLoadData;
 class UserData;
 
+int SongLoad( void *data_ptr );
+double LinearCrossfade( double a, double b, double b_percent );
+double EqualPowerCrossfade( double a, double b, double b_percent );
+Sint16 Finalize( double value );
+bool CalculateCrossfade( Song *current_song, const Song *next_song, double *crossfade_for_beats, double *crossfade_at_beat );
 void AudioCallback( void *userdata, Uint8* stream, int len );
 void BufferedAudioCallback( void *userdata, Uint8* stream, int len );
-
-int SongLoad( void *data_ptr );
+std::deque<std::string> DirSongs( std::string path );
 
 #ifndef likely
 #ifdef __GNUC__
@@ -48,7 +59,6 @@ namespace ResampleMethod
 	{
 		Auto = 0,
 		Nearest,
-		Linear,
 		Cubic
 	};
 }
@@ -60,13 +70,11 @@ namespace ResampleMethod
 class Song
 {
 public:
+	AudioFile Audio;
 	double BPM;
-	Mix_Chunk *Chunk;
 	double CurrentFrame, MaxFrame, FirstBeatFrame, FirstOutroFrame;
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
-	const SDL_AudioSpec *Spec;
-	std::string TempFile;
 	
 	Song( std::string filename, const SDL_AudioSpec *spec )
 	{
@@ -77,162 +85,99 @@ public:
 		FirstOutroFrame = 0.;
 		IntroBeats = 0;
 		OutroBeats = 0;
-		Spec = spec;
 		
-		Chunk = Mix_LoadWAV( filename.c_str() );
-		if( ! Chunk )
+		bool loaded = false;
+#ifdef USE_SDL_MIXER
+		if( ! loaded )
+			loaded = Audio.LoadWithSDLMixer( filename.c_str(), spec, false );
+#endif
+#ifdef USE_LIBAV
+		if( ! loaded )
+			loaded = Audio.LoadWithLibAV( filename.c_str() );
+#endif
+#if defined(USE_SDL_MIXER) && defined(USE_EXTERNAL_FFMPEG)
+		if( ! loaded )
+			loaded = Audio.LoadWithSDLMixer( filename.c_str(), spec, true );
+#endif
+		if( loaded )
 		{
-			#ifdef WIN32
-				#define TEMPDIR "C:\\Windows\\Temp\\"
-				#define FFMPEG "ffmpeg.exe"
-			#else
-				#define TEMPDIR "/tmp/"
-				#define FFMPEG "ffmpeg"
-			#endif
-			
-			const char *last_slash = strrchr( filename.c_str(), '/' );
-			#ifdef WIN32
-			if( ! last_slash )
-				last_slash = strrchr( filename.c_str(), '\\' );
-			#endif
-			char new_filename[ 1024 ];
-			snprintf( new_filename, 1024, "%s%s.wav", TEMPDIR, last_slash ? (last_slash + 1) : filename.c_str() );
-			Chunk = Mix_LoadWAV( new_filename );
-			if( ! Chunk )
-			{
-				char cmd[ 1024*128 ];
-				snprintf( cmd, 1024*128, "%s -loglevel quiet -i \"%s\" \"%s\"", FFMPEG, filename.c_str(), new_filename );
-				system( cmd );
-				Chunk = Mix_LoadWAV( new_filename );
-				TempFile = new_filename;
-			}
-		}
-		if( Chunk )
-		{
-			// For simplicity's sake, assume it's always 16-bit audio.
-			MaxFrame = Chunk->alen / (2 * Spec->channels);
+			MaxFrame = Audio.Size / (Audio.BytesPerSample * Audio.Channels);
 			
 			if( MaxFrame < 0.5 )
 			{
 				printf( "%s: zero-length\n", filename.c_str() );
-				Mix_FreeChunk( Chunk );
-				Chunk = NULL;
+				Audio.Clear();
 			}
-			else if( MaxFrame / (double) Spec->freq < 30. )
+			else if( MaxFrame / (double) Audio.SampleRate < 30. )
 			{
-				printf( "%s: only %.1f sec long\n", filename.c_str(), MaxFrame / (double) Spec->freq );
-				Mix_FreeChunk( Chunk );
-				Chunk = NULL;
+				printf( "%s: only %.1f sec long\n", filename.c_str(), MaxFrame / (double) Audio.SampleRate );
+				Audio.Clear();
 			}
 		}
 		else
 		{
 			MaxFrame = 0.;
-			printf( "%s: %s\n", filename.c_str(), Mix_GetError() );
+			printf( "%s: %s\n", filename.c_str(), Audio.Error );
 		}
 	}
 	
-	virtual ~Song()
+	~Song()
 	{
-		if( Chunk )
-			Mix_FreeChunk( Chunk );
-		Chunk = NULL;
-		
-		if( TempFile.length() )
-		{
-			#ifdef WIN32
-				#define REMOVE "del"
-			#else
-				#define REMOVE "rm"
-			#endif
-			
-			char cmd[ 1024 ];
-			snprintf( cmd, 1024, "%s \"%s\"", REMOVE, TempFile.c_str() );
-			system( cmd );
-		}
 	}
 	
 	void SetFirstBeat( int minutes, double seconds )
 	{
-		if( Chunk )
-			FirstBeatFrame = Spec->freq * ((60. * minutes) + seconds);
-		else
-			FirstBeatFrame = 0.;
+		FirstBeatFrame = Audio.SampleRate * ((60. * minutes) + seconds);
 	}
 	
 	double NearestFrame( Uint8 channel ) const
 	{
-		if(likely( Chunk && (channel < Spec->channels) ))
-		{
-			Sint16 *buffer16 = (Sint16*) Chunk->abuf;
-			size_t a_index = Spec->channels * (size_t) CurrentFrame;
-			size_t b_index = a_index + Spec->channels;
-			Sint16 a = likely(a_index < Chunk->alen / 2) ? buffer16[ a_index ] : 0;
-			Sint16 b = likely(b_index < Chunk->alen / 2) ? buffer16[ b_index ] : 0;
-			double unused = 0.;
-			double b_part = modf( CurrentFrame, &unused );
-			return (b_part >= 0.5) ? b : a;
-		}
-		else
-			return 0.;
-	}
-	
-	double LinearFrame( Uint8 channel ) const
-	{
-		if(likely( Chunk && (channel < Spec->channels) ))
-		{
-			Sint16 *buffer16 = (Sint16*) Chunk->abuf;
-			size_t a_index = Spec->channels * (size_t) CurrentFrame;
-			size_t b_index = a_index + Spec->channels;
-			Sint16 a = likely(a_index < Chunk->alen / 2) ? buffer16[ a_index ] : 0;
-			Sint16 b = likely(b_index < Chunk->alen / 2) ? buffer16[ b_index ] : 0;
-			double unused = 0.;
-			double b_part = modf( CurrentFrame, &unused );
-			return a * (1. - b_part) + b * b_part;
-		}
-		else
-			return 0.;
+		channel %= Audio.Channels;
+		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
+		size_t a_index = Audio.Channels * (size_t) CurrentFrame;
+		size_t b_index = a_index + Audio.Channels;
+		Sint16 a = likely(a_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ a_index ] : 0;
+		Sint16 b = likely(b_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ b_index ] : 0;
+		double unused = 0.;
+		double b_part = modf( CurrentFrame, &unused );
+		return (b_part >= 0.5) ? b : a;
 	}
 	
 	double CubicFrame( Uint8 channel ) const
 	{
-		if(likely( Chunk && (channel < Spec->channels) ))
+		channel %= Audio.Channels;
+		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
+		size_t a_index = Audio.Channels * (size_t) CurrentFrame;
+		size_t b_index = a_index + Audio.Channels;
+		long prev_index = a_index - Audio.Channels;
+		size_t next_index = b_index + Audio.Channels;
+		double a = 0., b = 0., prev = 0., next = 0.;
+		if(likely( (prev_index >= 0) && (next_index < Audio.Size / Audio.BytesPerSample) ))
 		{
-			Sint16 *buffer16 = (Sint16*) Chunk->abuf;
-			size_t a_index = Spec->channels * (size_t) CurrentFrame;
-			size_t b_index = a_index + Spec->channels;
-			long prev_index = a_index - Spec->channels;
-			size_t next_index = b_index + Spec->channels;
-			double a = 0., b = 0., prev = 0., next = 0.;
-			if(likely( (prev_index >= 0) && (next_index < Chunk->alen / 2) ))
-			{
-				prev = buffer16[ prev_index ];
-				a = buffer16[ a_index ];
-				b = buffer16[ b_index ];
-				next = buffer16[ next_index ];
-			}
-			else
-			{
-				prev = ((prev_index >= 0) && (prev_index < (long)( Chunk->alen / 2 ))) ? buffer16[ prev_index ] : 0.;
-				a = (a_index < Chunk->alen / 2) ? buffer16[ a_index ] : 0.;
-				b = (b_index < Chunk->alen / 2) ? buffer16[ b_index ] : 0.;
-				next = (next_index < Chunk->alen / 2) ? buffer16[ next_index ] : 0.;
-			}
-			double unused = 0.;
-			double b_part = modf( CurrentFrame, &unused );
-			/*
-			double along_a_tangent = a + b_part * (b - prev) / 2.;
-			double along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
-			double remaining_portion = 1. - b_part * b_part - (1. - b_part) * (1. - b_part);
-			double linear = a + (b - a) * b_part;
-			return along_a_tangent * (1. - b_part) * (1. - b_part) + along_b_tangent * b_part * b_part + linear * remaining_portion;
-			*/
-			// Paul Breeuwsma came up with a simpler cubic interpolation than mine, so I'm using it.
-			// http://www.paulinternet.nl/?page=bicubic
-			return a + 0.5 * b_part * (b - prev + b_part * (2. * prev - 5. * a + 4. * b - next + b_part * (3. * (a - b) + next - prev)));
+			prev = buffer16[ prev_index ];
+			a = buffer16[ a_index ];
+			b = buffer16[ b_index ];
+			next = buffer16[ next_index ];
 		}
 		else
-			return 0.;
+		{
+			prev = ((prev_index >= 0) && (prev_index < (long)( Audio.Size / Audio.BytesPerSample ))) ? buffer16[ prev_index ] : 0.;
+			a = (a_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ a_index ] : 0.;
+			b = (b_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ b_index ] : 0.;
+			next = (next_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ next_index ] : 0.;
+		}
+		double unused = 0.;
+		double b_part = modf( CurrentFrame, &unused );
+		/*
+		double along_a_tangent = a + b_part * (b - prev) / 2.;
+		double along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
+		double remaining_portion = 1. - b_part * b_part - (1. - b_part) * (1. - b_part);
+		double linear = a + (b - a) * b_part;
+		return along_a_tangent * (1. - b_part) * (1. - b_part) + along_b_tangent * b_part * b_part + linear * remaining_portion;
+		*/
+		// Paul Breeuwsma came up with a simpler cubic interpolation than mine, so I'm using it.
+		// http://www.paulinternet.nl/?page=bicubic
+		return a + 0.5 * b_part * (b - prev + b_part * (2. * prev - 5. * a + 4. * b - next + b_part * (3. * (a - b) + next - prev)));
 	}
 	
 	void Advance( double playback_bpm )
@@ -257,18 +202,12 @@ public:
 	
 	double BeatAtFrame( double frame ) const
 	{
-		if( Chunk )
-			return (frame - FirstBeatFrame) * BPM / (60. * Spec->freq);
-		else
-			return 0.;
+		return (frame - FirstBeatFrame) * BPM / (60. * Audio.SampleRate);
 	}
 	
 	double FrameAtBeat( double beat ) const
 	{
-		if( Chunk )
-			return beat * (60. * Spec->freq) / BPM + FirstBeatFrame;
-		else
-			return 0.;
+		return beat * (60. * Audio.SampleRate) / BPM + FirstBeatFrame;
 	}
 	
 	double NearestBeatFrameAtFrame( double frame )
@@ -334,282 +273,282 @@ public:
 	
 	void Analyze( void )
 	{
-		if( Chunk )
+		if( !( Audio.Data && Audio.Size ) )
+			return;
+		
+		// Apply low-pass filter and keep track of average peak height over a period of samples.
+		
+		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
+		
+		// Don't analyze more than 10 minutes of audio per track.
+		size_t max_analysis_frame = Audio.SampleRate * 60 * 10;
+		if( max_analysis_frame > MaxFrame )
+			max_analysis_frame = MaxFrame;
+		
+		double prev = 0., prev_abs = 0.;
+		std::map<size_t,double> avg_peak;
+		int num_peaks = 1;
+		double highest = 0.;
+		
+		// Parameters for low-pass filter.
+		size_t samples = 1800;
+		if( samples > max_analysis_frame )
+			samples = max_analysis_frame;
+		double prev_sample_power = 1.0;
+		
+		// Get starting block sum for the low-pass filter.
+		for( size_t frame = 0; frame < samples; frame ++ )
+			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
+				prev += buffer16[ frame * Audio.Channels + channel ] * pow( prev_sample_power, samples - frame - 1. ) / (double) Audio.Channels;
+		
+		// Process the rest of the audio.
+		for( size_t frame = samples; frame < max_analysis_frame; frame ++ )
 		{
-			// Apply low-pass filter and keep track of average peak height over a period of samples.
-			
-			Sint16 *buffer16 = (Sint16*) Chunk->abuf;
-			
-			// Don't analyze more than 10 minutes of audio per track.
-			size_t max_analysis_frame = Spec->freq * 60 * 10;
-			if( max_analysis_frame > MaxFrame )
-				max_analysis_frame = MaxFrame;
-			
-			double prev = 0., prev_abs = 0.;
-			std::map<size_t,double> avg_peak;
-			int num_peaks = 1;
-			double highest = 0.;
-			
-			// Parameters for low-pass filter.
-			size_t samples = 1800;
-			if( samples > max_analysis_frame )
-				samples = max_analysis_frame;
-			double prev_sample_power = 1.0;
-			
-			// Get starting block sum for the low-pass filter.
-			for( size_t frame = 0; frame < samples; frame ++ )
-				for( size_t channel = 0; channel < Spec->channels; channel ++ )
-					prev += buffer16[ frame * Spec->channels + channel ] * pow( prev_sample_power, samples - frame - 1. ) / (double) Spec->channels;
-			
-			// Process the rest of the audio.
-			for( size_t frame = samples; frame < max_analysis_frame; frame ++ )
+			// Subtract the oldest sample of the block and add the new one.
+			double point = prev * prev_sample_power;
+			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
 			{
-				// Subtract the oldest sample of the block and add the new one.
-				double point = prev * prev_sample_power;
-				for( size_t channel = 0; channel < Spec->channels; channel ++ )
-				{
-					point -= buffer16[ (frame - samples) * Spec->channels + channel ] * pow( prev_sample_power, samples ) / (double) Spec->channels;
-					point += buffer16[ frame * Spec->channels + channel ] / (double) Spec->channels;
-				}
+				point -= buffer16[ (frame - samples) * Audio.Channels + channel ] * pow( prev_sample_power, samples ) / (double) Audio.Channels;
+				point += buffer16[ frame * Audio.Channels + channel ] / (double) Audio.Channels;
+			}
+			
+			if( fabs(point) < prev_abs )
+			{
+				// Found a peak on the previous frame.
+				size_t peak_frame = frame - (samples / 2) - 1;
 				
-				if( fabs(point) < prev_abs )
+				if( avg_peak.size() )
 				{
-					// Found a peak on the previous frame.
-					size_t peak_frame = frame - (samples / 2) - 1;
-					
-					if( avg_peak.size() )
+					if( avg_peak.rbegin()->first + 900 < peak_frame )
 					{
-						if( avg_peak.rbegin()->first + 900 < peak_frame )
-						{
-							avg_peak.rbegin()->second += prev_abs;
-							num_peaks ++;
-						}
-						else
-						{
-							avg_peak.rbegin()->second /= num_peaks;
-							if( avg_peak.rbegin()->second > highest )
-								highest = avg_peak.rbegin()->second;
-							
-							avg_peak[ peak_frame ] = prev_abs;
-							num_peaks = 1;
-						}
+						avg_peak.rbegin()->second += prev_abs;
+						num_peaks ++;
 					}
 					else
 					{
+						avg_peak.rbegin()->second /= num_peaks;
+						if( avg_peak.rbegin()->second > highest )
+							highest = avg_peak.rbegin()->second;
+						
 						avg_peak[ peak_frame ] = prev_abs;
 						num_peaks = 1;
 					}
-					
-					prev_abs = 0.;
 				}
 				else
-					prev_abs = fabs(point);
-				
-				prev = point;
-			}
-			
-			if( avg_peak.size() )
-			{
-				avg_peak.rbegin()->second /= num_peaks;
-				if( avg_peak.rbegin()->second > highest )
-					highest = avg_peak.rbegin()->second;
-			}
-			
-			
-			// Look for significant increases in peak averages (bass hits).
-			
-			double min_value = highest / 8., min_inc_factor = 128.;
-			prev = 0.;
-			Beats.clear();
-			bool prev_adjacent = false;
-			
-			for( std::map<size_t,double>::iterator avg_iter = avg_peak.begin(); avg_iter != avg_peak.end(); avg_iter ++ )
-			{
-				if( prev_adjacent && (avg_iter->second > prev) )
 				{
-					std::map<size_t,double>::iterator last = Beats.end();
-					last --;
-					Beats.erase( last );
-					Beats[ avg_iter->first ] = avg_iter->second;
+					avg_peak[ peak_frame ] = prev_abs;
+					num_peaks = 1;
 				}
-				else if( (avg_iter->second >= min_value) && (avg_iter->second > prev * min_inc_factor) )
-				{
-					Beats[ avg_iter->first ] = avg_iter->second;
-					prev_adjacent = true;
-				}
-				else
-					prev_adjacent = false;
-			
-				prev = avg_iter->second;
+				
+				prev_abs = 0.;
 			}
+			else
+				prev_abs = fabs(point);
 			
-			size_t first_beat = avg_peak.begin()->first;
-			
-			
-			// Search a range of likely BPMs and see how well the beats match.
-			
-			size_t best_frame_skip = Spec->freq * 60 / 140;
-			size_t best_first_beat = first_beat;
-			double best_error = FLT_MAX;
-			int best_doff = INT_MAX;
-			
-			for( int bpm = 120; (bpm <= 150) && (best_error > 0.); bpm ++ )
+			prev = point;
+		}
+		
+		if( avg_peak.size() )
+		{
+			avg_peak.rbegin()->second /= num_peaks;
+			if( avg_peak.rbegin()->second > highest )
+				highest = avg_peak.rbegin()->second;
+		}
+		
+		
+		// Look for significant increases in peak averages (bass hits).
+		
+		double min_value = highest / 8., min_inc_factor = 128.;
+		prev = 0.;
+		Beats.clear();
+		bool prev_adjacent = false;
+		
+		for( std::map<size_t,double>::iterator avg_iter = avg_peak.begin(); avg_iter != avg_peak.end(); avg_iter ++ )
+		{
+			if( prev_adjacent && (avg_iter->second > prev) )
 			{
-				// Search at a BPM and see how closely it matches.
+				std::map<size_t,double>::iterator last = Beats.end();
+				last --;
+				Beats.erase( last );
+				Beats[ avg_iter->first ] = avg_iter->second;
+			}
+			else if( (avg_iter->second >= min_value) && (avg_iter->second > prev * min_inc_factor) )
+			{
+				Beats[ avg_iter->first ] = avg_iter->second;
+				prev_adjacent = true;
+			}
+			else
+				prev_adjacent = false;
+		
+			prev = avg_iter->second;
+		}
+		
+		size_t first_beat = avg_peak.begin()->first;
+		
+		
+		// Search a range of likely BPMs and see how well the beats match.
+		
+		size_t best_frame_skip = Audio.SampleRate * 60 / 140;
+		size_t best_first_beat = first_beat;
+		double best_error = FLT_MAX;
+		int best_doff = INT_MAX;
+		
+		for( int bpm = 120; (bpm <= 150) && (best_error > 0.); bpm ++ )
+		{
+			// Search at a BPM and see how closely it matches.
+			
+			size_t frame_skip = (Audio.SampleRate * 60. / (double) bpm) + 0.5;
+			size_t first_beat_matched = 0;
+			
+			// Try a few different starting points.
+			for( std::map<size_t,double>::iterator beat_iter = Beats.begin(); (beat_iter != Beats.end()) && (beat_iter->first < max_analysis_frame / 2); beat_iter ++ )
+			{
+				size_t start = beat_iter->first;
+				std::vector<int> doff_behind, doff_ahead;
+				int off_behind = 0, off_ahead = 0;
+				int misses_behind = 0, misses_ahead = 0;
 				
-				size_t frame_skip = (Spec->freq * 60. / (double) bpm) + 0.5;
-				size_t first_beat_matched = 0;
-				
-				// Try a few different starting points.
-				for( std::map<size_t,double>::iterator beat_iter = Beats.begin(); (beat_iter != Beats.end()) && (beat_iter->first < max_analysis_frame / 2); beat_iter ++ )
+				// Look at each place we expect the beat to hit.
+				for( size_t frame = start; frame < max_analysis_frame; frame += frame_skip )
 				{
-					size_t start = beat_iter->first;
-					std::vector<int> doff_behind, doff_ahead;
-					int off_behind = 0, off_ahead = 0;
-					int misses_behind = 0, misses_ahead = 0;
-					
-					// Look at each place we expect the beat to hit.
-					for( size_t frame = start; frame < max_analysis_frame; frame += frame_skip )
+					std::map<size_t,double>::iterator exact_beat_found = Beats.find( frame );
+					if( exact_beat_found != Beats.end() )
 					{
-						std::map<size_t,double>::iterator exact_beat_found = Beats.find( frame );
-						if( exact_beat_found != Beats.end() )
+						// We found an exact match.
+					
+						if( ! misses_behind )
+							doff_behind.push_back( -off_behind );
+						if( ! misses_ahead )
+							doff_ahead.push_back( -off_ahead );
+						
+						off_behind = 0;
+						off_ahead = 0;
+					
+						misses_behind = 0;
+						misses_ahead = 0;
+					}
+					else
+					{
+						// No exact match, check for beats near where we guessed.
+						
+						Beats[ frame ] = 0.;
+						std::map<size_t,double>::iterator temp = Beats.find( frame );
+						std::map<size_t,double>::iterator ahead = temp;
+						ahead ++;
+						std::map<size_t,double>::reverse_iterator behind(temp);
+						behind ++;
+						
+						if( (behind != Beats.rend()) && (frame - behind->first < frame_skip / 2) )
 						{
-							// We found an exact match.
-						
-							if( ! misses_behind )
-								doff_behind.push_back( -off_behind );
-							if( ! misses_ahead )
-								doff_ahead.push_back( -off_ahead );
+							int off = behind->first - frame;
 							
-							off_behind = 0;
-							off_ahead = 0;
-						
+							if( ! misses_behind )
+								doff_behind.push_back( off - off_behind );
+							
+							off_behind = off;
+							
 							misses_behind = 0;
+						}
+						else
+							misses_behind ++;
+						
+						if( (ahead != Beats.end()) && (ahead->first - frame < frame_skip / 2) )
+						{
+							int off = ahead->first - frame;
+							
+							if( ! misses_ahead )
+								doff_ahead.push_back( off - off_ahead );
+							
+							off_ahead = off;
+							
 							misses_ahead = 0;
 						}
 						else
-						{
-							// No exact match, check for beats near where we guessed.
-							
-							Beats[ frame ] = 0.;
-							std::map<size_t,double>::iterator temp = Beats.find( frame );
-							std::map<size_t,double>::iterator ahead = temp;
-							ahead ++;
-							std::map<size_t,double>::reverse_iterator behind(temp);
-							behind ++;
-							
-							if( (behind != Beats.rend()) && (frame - behind->first < frame_skip / 2) )
-							{
-								int off = behind->first - frame;
-								
-								if( ! misses_behind )
-									doff_behind.push_back( off - off_behind );
-								
-								off_behind = off;
-								
-								misses_behind = 0;
-							}
-							else
-								misses_behind ++;
-							
-							if( (ahead != Beats.end()) && (ahead->first - frame < frame_skip / 2) )
-							{
-								int off = ahead->first - frame;
-								
-								if( ! misses_ahead )
-									doff_ahead.push_back( off - off_ahead );
-								
-								off_ahead = off;
-								
-								misses_ahead = 0;
-							}
-							else
-								misses_ahead ++;
-							
-							Beats.erase( temp );
-						}
+							misses_ahead ++;
 						
-						// Assume the first beat of the first detected pair is the first real beat.
-						// NOTE: This might catch weird intro beats before the regular pattern.
-						if( ! first_beat_matched )
-						{
-							if( doff_behind.size() )
-								first_beat_matched = frame + off_behind;
-							else if( doff_ahead.size() )
-								first_beat_matched = frame + off_ahead;
-						}
+						Beats.erase( temp );
 					}
 					
-					
-					// Get the mean square errors between differences (how consistently it slipped).
-					double mean_behind = 0., mean_ahead = 0.;
-					double error_behind = FLT_MAX, error_ahead = FLT_MAX;
-					
-					if( doff_behind.size() >= 2 )
+					// Assume the first beat of the first detected pair is the first real beat.
+					// NOTE: This might catch weird intro beats before the regular pattern.
+					if( ! first_beat_matched )
 					{
-						for( std::vector<int>::iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
-							mean_behind += *doff_iter / (double) doff_behind.size();
-						
-						error_behind = 0.;
-						
-						for( std::vector<int>::iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
-						{
-							double ddoff = (*doff_iter - mean_behind);
-							error_behind += (ddoff * ddoff) / (double) doff_behind.size();
-						}
-						
-						// Attempt to level the playing field.
-						error_behind *= bpm / (double) doff_behind.size();
-					}
-					
-					if( doff_ahead.size() >= 2 )
-					{
-						for( std::vector<int>::iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
-							mean_ahead += *doff_iter / (double) doff_ahead.size();
-						
-						error_ahead = 0.;
-						
-						for( std::vector<int>::iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
-						{
-							double ddoff = (*doff_iter - mean_ahead);
-							error_ahead += (ddoff * ddoff) / (double) doff_ahead.size();
-						}
-						
-						// Attempt to level the playing field.
-						error_behind *= bpm / (double) doff_ahead.size();
-					}
-					
-					// Sort differences so we can find median.
-					std::sort( doff_behind.begin(), doff_behind.end() );
-					std::sort( doff_ahead.begin(), doff_ahead.end() );
-					
-					// Find the lowest difference between differences for the closest prediction.
-					if( doff_behind.size() && (error_behind < best_error) )
-					{
-						best_doff = doff_behind[ doff_behind.size() / 2 ];
-						best_frame_skip = frame_skip + best_doff;
-						best_first_beat = first_beat_matched ? first_beat_matched : first_beat;
-						best_error = error_behind;
-					}
-					if( doff_ahead.size() && (error_ahead < best_error) )
-					{
-						best_doff = doff_ahead[ doff_ahead.size() / 2 ];
-						best_frame_skip = frame_skip + best_doff;
-						best_first_beat = first_beat_matched ? first_beat_matched : first_beat;
-						best_error = error_ahead;
+						if( doff_behind.size() )
+							first_beat_matched = frame + off_behind;
+						else if( doff_ahead.size() )
+							first_beat_matched = frame + off_ahead;
 					}
 				}
+				
+				
+				// Get the mean square errors between differences (how consistently it slipped).
+				double mean_behind = 0., mean_ahead = 0.;
+				double error_behind = FLT_MAX, error_ahead = FLT_MAX;
+				
+				if( doff_behind.size() >= 2 )
+				{
+					for( std::vector<int>::iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
+						mean_behind += *doff_iter / (double) doff_behind.size();
+					
+					error_behind = 0.;
+					
+					for( std::vector<int>::iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
+					{
+						double ddoff = (*doff_iter - mean_behind);
+						error_behind += (ddoff * ddoff) / (double) doff_behind.size();
+					}
+					
+					// Attempt to level the playing field.
+					error_behind *= bpm / (double) doff_behind.size();
+				}
+				
+				if( doff_ahead.size() >= 2 )
+				{
+					for( std::vector<int>::iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
+						mean_ahead += *doff_iter / (double) doff_ahead.size();
+					
+					error_ahead = 0.;
+					
+					for( std::vector<int>::iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
+					{
+						double ddoff = (*doff_iter - mean_ahead);
+						error_ahead += (ddoff * ddoff) / (double) doff_ahead.size();
+					}
+					
+					// Attempt to level the playing field.
+					error_behind *= bpm / (double) doff_ahead.size();
+				}
+				
+				// Sort differences so we can find median.
+				std::sort( doff_behind.begin(), doff_behind.end() );
+				std::sort( doff_ahead.begin(), doff_ahead.end() );
+				
+				// Find the lowest difference between differences for the closest prediction.
+				if( doff_behind.size() && (error_behind < best_error) )
+				{
+					best_doff = doff_behind[ doff_behind.size() / 2 ];
+					best_frame_skip = frame_skip + best_doff;
+					best_first_beat = first_beat_matched ? first_beat_matched : first_beat;
+					best_error = error_behind;
+				}
+				if( doff_ahead.size() && (error_ahead < best_error) )
+				{
+					best_doff = doff_ahead[ doff_ahead.size() / 2 ];
+					best_frame_skip = frame_skip + best_doff;
+					best_first_beat = first_beat_matched ? first_beat_matched : first_beat;
+					best_error = error_ahead;
+				}
 			}
-			
-			// If it's close, round to the nearest whole BPM.
-			double bpm_rounding = 0.106;
-			double bpm_fpart = modf( Spec->freq * 60. / (double) best_frame_skip, &BPM );
-			if( bpm_fpart >= (1. - bpm_rounding) )
-				BPM += 1.;
-			else if( bpm_fpart > bpm_rounding )
-				BPM += bpm_fpart;
-			FirstBeatFrame = best_first_beat;
 		}
+		
+		// If it's close, round to the nearest whole BPM.
+		double bpm_rounding = 0.106;
+		double bpm_fpart = modf( Audio.SampleRate * 60. / (double) best_frame_skip, &BPM );
+		if( bpm_fpart >= (1. - bpm_rounding) )
+			BPM += 1.;
+		else if( bpm_fpart > bpm_rounding )
+			BPM += bpm_fpart;
+		FirstBeatFrame = best_first_beat;
 	}
 };
 
@@ -635,7 +574,7 @@ public:
 		LoadingSong = NULL;
 	}
 	
-	virtual ~SongLoadData(){}
+	~SongLoadData(){}
 };
 
 
@@ -655,7 +594,6 @@ public:
 	bool Repeat;
 	bool Metronome;
 	PlaybackBuffer Buffer;
-	time_t LoadTimeoutSecs;
 	FILE *WriteTo;
 	size_t WroteBytes;
 	std::deque<std::string> Queue;
@@ -675,7 +613,6 @@ public:
 		Repeat = true;
 		Metronome = false;
 		Buffer.SetSize( 131072 );
-		LoadTimeoutSecs = 120;
 		WriteTo = NULL;
 		WroteBytes = 0;
 	}
@@ -692,8 +629,6 @@ public:
 	
 	void CheckThreads( void )
 	{
-		time_t now_secs = time(NULL);
-		
 		for( std::map<SDL_Thread*,SongLoadData*>::iterator thread_iter = LoadThreads.begin(); thread_iter != LoadThreads.end(); thread_iter ++ )
 		{
 			if( thread_iter->second->Finished )
@@ -706,7 +641,7 @@ public:
 				// Make sure the song loaded okay.
 				if( thread_iter->second->LoadingSong )
 				{
-					printf( "%s: %.2f BPM, Start %.4f sec, Beats %.1f\n", thread_iter->second->Filename.c_str(), thread_iter->second->LoadingSong->BPM, thread_iter->second->LoadingSong->FirstBeatFrame / thread_iter->second->LoadingSong->Spec->freq, thread_iter->second->LoadingSong->TotalBeats() );
+					printf( "%s: %.2f BPM, Start %.4f sec, Beats %.1f\n", thread_iter->second->Filename.c_str(), thread_iter->second->LoadingSong->BPM, thread_iter->second->LoadingSong->FirstBeatFrame / thread_iter->second->LoadingSong->Audio.SampleRate, thread_iter->second->LoadingSong->TotalBeats() );
 					fflush( stdout );
 					
 					if( thread_iter->second->UD->Repeat )
@@ -733,24 +668,10 @@ public:
 				LoadThreads.erase( thread_iter );
 				break;
 			}
-			else if( now_secs > thread_iter->second->StartSecs + LoadTimeoutSecs )
-			{
-				// We gave it some time to try loading, so if it's not done yet, kill it.
-				// This is because SDL_sound can get stuck when loading certain songs.
-				
-				printf( "%s: Loading Timeout\n", thread_iter->second->Filename.c_str() );
-				fflush( stdout );
-				
-				SDL_KillThread( thread_iter->first );
-				
-				delete thread_iter->second;
-				LoadThreads.erase( thread_iter );
-				break;
-			}
 		}
 	}
 	
-	virtual ~UserData(){}
+	~UserData(){}
 };
 
 
@@ -767,7 +688,7 @@ int SongLoad( void *data_ptr )
 	data->LoadingSong = new Song( data->Filename, &(data->UD->Spec) );
 	
 	// Make sure it loaded okay.
-	if( data->LoadingSong->Chunk && data->LoadingSong->Chunk->alen )
+	if( data->LoadingSong->Audio.Data && data->LoadingSong->Audio.Size )
 	{
 		// Wait 10ms before beginning to analyze song.
 		SDL_Delay( 10 );
@@ -871,7 +792,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	if( ! ud->Playing )
 		return;
 	
-	// For simplicity's sake, assume it's always 16-bit audio.
+	// For simplicity's sake, assume it's always 16-bit audio output.
 	Sint16 *stream16 = (Sint16*) stream;
 	
 	bool calculated_crossfade = false;
@@ -915,15 +836,10 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			{
 				// Not crossfading yet.
 				
-				if( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.5)) )
+				if( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) )
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 						stream16[ i + channel ] = Finalize( current_song->NearestFrame( channel ) * ud->Volume );
-				}
-				else if( ud->Resample == ResampleMethod::Linear )
-				{
-					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->LinearFrame( channel ) * ud->Volume );
 				}
 				else
 				{
@@ -940,23 +856,13 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				if( ud->SourceBPM )
 					bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
 				
-				bool a_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.5)) );
-				bool b_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(next_song->BPM - bpm) < 0.5)) );
+				bool a_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) );
+				bool b_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(next_song->BPM - bpm) < 0.05)) );
 				
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 				{
-					double a, b;
-					if( ud->Resample == ResampleMethod::Linear )
-					{
-						a = current_song->LinearFrame( channel );
-						b = next_song->LinearFrame( channel );
-					}
-					else
-					{
-						a = a_nearest ? current_song->NearestFrame( channel ) : current_song->CubicFrame( channel );
-						b = b_nearest ? next_song->NearestFrame( channel ) : next_song->CubicFrame( channel );
-					}
-					
+					double a = a_nearest ? current_song->NearestFrame( channel ) : current_song->CubicFrame( channel );
+					double b = b_nearest ? next_song->NearestFrame( channel ) : next_song->CubicFrame( channel );
 					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) * ud->Volume );
 				}
 				
@@ -1157,8 +1063,6 @@ int main( int argc, char **argv )
 				else
 					want.callback = AudioCallback;
 			}
-			else if( strncasecmp( argv[ i ], "--timeout=", strlen("--timeout=") ) == 0 )
-				userdata.LoadTimeoutSecs = atoi( argv[ i ] + strlen("--timeout=") );
 			else if( strncasecmp( argv[ i ], "--write=", strlen("--write=") ) == 0 )
 				write = argv[ i ] + strlen("--write=");
 			else
@@ -1199,8 +1103,10 @@ int main( int argc, char **argv )
 		SDL_SetVideoMode( 200, 50, 0, 0 );
 	}
 	userdata.Buffer.Callback = AudioCallback;
+#ifdef USE_SDL_MIXER
 	Mix_OpenAudio( want.freq, want.format, want.channels, want.samples );
 	SDL_CloseAudio();
+#endif
 	SDL_OpenAudio( &want, &(userdata.Spec) );
 	
 	// Shuffle song list if requested.
@@ -1328,11 +1234,6 @@ int main( int argc, char **argv )
 					{
 						if( userdata.Resample == ResampleMethod::Nearest )
 						{
-							userdata.Resample = ResampleMethod::Linear;
-							printf( "Resample: Linear\n" );
-						}
-						else if( userdata.Resample == ResampleMethod::Linear )
-						{
 							userdata.Resample = ResampleMethod::Cubic;
 							printf( "Resample: Cubic\n" );
 						}
@@ -1393,13 +1294,6 @@ int main( int argc, char **argv )
 			userdata.CheckThreads();
 		}
 	}
-	if( userdata.LoadThreads.size() )
-	{
-		printf( "Killing threads...\n" );
-		userdata.LoadTimeoutSecs = 1;
-		SDL_Delay( 1000 );
-		userdata.CheckThreads();
-	}
 	userdata.Queue.clear();
 	while( userdata.Songs.size() )
 	{
@@ -1410,7 +1304,9 @@ int main( int argc, char **argv )
 	
 	// Quit SDL.
 	printf( "Closing SDL...\n" );
+	SDL_LockAudio();
 	SDL_CloseAudio();
+	SDL_UnlockAudio();
 	SDL_Quit();
 	
 	printf( "Done quitting.\n" );

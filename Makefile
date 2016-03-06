@@ -1,7 +1,7 @@
 PREFIX = /usr
 CC = $(PREFIX)/bin/g++
 O = 2
-CFLAGS = -DUSE_LIBAV -DUSE_SDL_MIXER -DUSE_EXTERNAL_FFMPEG -O$(O) -march=native -mfpmath=sse -fomit-frame-pointer -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing
+CFLAGS = -DUSE_LIBAV -O$(O) -march=native -mfpmath=sse -fomit-frame-pointer -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing
 INC = $(PREFIX)/include $(PREFIX)/include/SDL
 LIB = libSDLmain.a libSDL_mixer.so libSDL.so ../local/lib/libavdevice.a ../local/lib/libavformat.a ../local/lib/libavfilter.a ../local/lib/libavcodec.a ../local/lib/libswresample.a ../local/lib/libswscale.a ../local/lib/libavutil.a libz.a liblzma.so libbz2.a
 LIBDIR = $(PREFIX)/lib

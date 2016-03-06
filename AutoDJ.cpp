@@ -75,8 +75,12 @@ public:
 	double CurrentFrame, MaxFrame, FirstBeatFrame, FirstOutroFrame;
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
-	
+
+#ifdef USE_SDL_MIXER
 	Song( std::string filename, const SDL_AudioSpec *spec )
+#else
+	Song( std::string filename )
+#endif
 	{
 		BPM = 140.;
 		CurrentFrame = 0.;
@@ -134,7 +138,7 @@ public:
 	{
 		channel %= Audio.Channels;
 		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
-		size_t a_index = Audio.Channels * (size_t) CurrentFrame;
+		size_t a_index = Audio.Channels * (size_t) CurrentFrame + channel;
 		size_t b_index = a_index + Audio.Channels;
 		Sint16 a = likely(a_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ a_index ] : 0;
 		Sint16 b = likely(b_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ b_index ] : 0;
@@ -147,7 +151,7 @@ public:
 	{
 		channel %= Audio.Channels;
 		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
-		size_t a_index = Audio.Channels * (size_t) CurrentFrame;
+		size_t a_index = Audio.Channels * (size_t) CurrentFrame + channel;
 		size_t b_index = a_index + Audio.Channels;
 		long prev_index = a_index - Audio.Channels;
 		size_t next_index = b_index + Audio.Channels;
@@ -180,9 +184,9 @@ public:
 		return a + 0.5 * b_part * (b - prev + b_part * (2. * prev - 5. * a + 4. * b - next + b_part * (3. * (a - b) + next - prev)));
 	}
 	
-	void Advance( double playback_bpm )
+	void Advance( double playback_bpm, int playback_rate )
 	{
-		CurrentFrame += playback_bpm / BPM;
+		CurrentFrame += playback_bpm * Audio.SampleRate / (BPM * playback_rate);
 	}
 	
 	double Beat( void ) const
@@ -684,9 +688,13 @@ int SongLoad( void *data_ptr )
 	
 	// Wait 10ms before beginning to load song.
 	SDL_Delay( 10 );
-	
+
+#ifdef USE_SDL_MIXER
 	data->LoadingSong = new Song( data->Filename, &(data->UD->Spec) );
-	
+#else
+	data->LoadingSong = new Song( data->Filename );
+#endif
+
 	// Make sure it loaded okay.
 	if( data->LoadingSong->Audio.Data && data->LoadingSong->Audio.Size )
 	{
@@ -847,7 +855,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 						stream16[ i + channel ] = Finalize( current_song->CubicFrame( channel ) * ud->Volume );
 				}
 				
-				current_song->Advance( bpm );
+				current_song->Advance( bpm, ud->Spec.freq );
 			}
 			else
 			{
@@ -866,8 +874,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) * ud->Volume );
 				}
 				
-				current_song->Advance( bpm );
-				next_song->Advance( bpm );
+				current_song->Advance( bpm, ud->Spec.freq );
+				next_song->Advance( bpm, ud->Spec.freq );
 				
 				// If we completed a crossfade, remove the song we faded from.
 				if(unlikely( crossfade >= 1. ))
@@ -1217,12 +1225,12 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_MINUS )
 					{
-						userdata.Volume -= 0.125;
+						userdata.Volume -= 0.0625;
 						printf( "Playback Volume: %.3f\n", userdata.Volume );
 					}
 					else if( key == SDLK_EQUALS )
 					{
-						userdata.Volume += 0.125;
+						userdata.Volume += 0.0625;
 						printf( "Playback Volume: %.3f\n", userdata.Volume );
 					}
 					else if( key == SDLK_a )

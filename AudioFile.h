@@ -6,7 +6,9 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/timestamp.h>
+#include <libavutil/opt.h>
 #include <libavformat/avformat.h>
+#include <libswresample/swresample.h>
 }
 #endif
 
@@ -48,7 +50,7 @@ private:
 	AVPacket pkt;
 	int audio_frame_count;
 	
-	int refcount;
+	SwrContext *swr;
 	
 	int decode_packet( int *got_frame );
 	int open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, enum AVMediaType type );

@@ -65,6 +65,7 @@ void AudioFile::Clear( void )
 	audio_stream_idx = -1;
 	frame = NULL;
 	audio_frame_count = 0;
+	swr = NULL;
 #endif
 }
 
@@ -180,6 +181,26 @@ bool AudioFile::LoadWithLibAV( const char *filename )
 		audio_dec_ctx = audio_stream->codec;
 	}
 
+	// We want interleaved 16-bit in the original channel layout and sample rate.
+	if( audio_dec_ctx->sample_fmt != AV_SAMPLE_FMT_S16 )
+	{
+		swr = swr_alloc_set_opts
+		(
+			NULL,                          // we're allocating a new context
+			audio_dec_ctx->channel_layout, // out_ch_layout
+			AV_SAMPLE_FMT_S16,             // out_sample_fmt
+			audio_dec_ctx->sample_rate,    // out_sample_rate
+			audio_dec_ctx->channel_layout, // in_ch_layout
+			audio_dec_ctx->sample_fmt,     // in_sample_fmt
+			audio_dec_ctx->sample_rate,    // in_sample_rate
+			0,                             // log_offset
+			NULL                           // log_ctx
+		);
+		int error = swr_init( swr );
+		if( error )
+			swr = NULL;
+	}
+
 	if (!audio_stream) {
 		//fprintf(stderr, "Could not find audio stream in the input, aborting\n");
 		ret = 1;
@@ -226,7 +247,8 @@ bool AudioFile::LoadWithLibAV( const char *filename )
 		if (av_sample_fmt_is_planar(sfmt)) {
 			av_get_sample_fmt_name(sfmt);
 			sfmt = av_get_packed_sample_fmt(sfmt);
-			n_channels = 1;
+			if( ! swr )
+				n_channels = 1;
 		}
 
 		if ((ret = get_format_from_sample_fmt(&fmt, sfmt)) < 0)
@@ -234,13 +256,17 @@ bool AudioFile::LoadWithLibAV( const char *filename )
 		
 		Channels = n_channels;
 		SampleRate = audio_dec_ctx->sample_rate;
-		BytesPerSample = av_get_bytes_per_sample(sfmt);
+		if( ! swr )
+			BytesPerSample = av_get_bytes_per_sample(sfmt);
 	}
 
 end:
 	avcodec_close(audio_dec_ctx);
 	avformat_close_input(&fmt_ctx);
 	av_frame_free(&frame);
+
+	if( swr )
+		swr_free( &swr );
 
 	return !(ret < 0);
 }
@@ -273,15 +299,25 @@ int AudioFile::decode_packet( int *got_frame )
 			size_t unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample((AVSampleFormat)frame->format);
 			audio_frame_count ++;
 
-			/* Write the raw audio data samples of the first plane. This works
-			 * fine for packed formats (e.g. AV_SAMPLE_FMT_S16). However,
-			 * most audio decoders output planar audio, which uses a separate
-			 * plane of audio samples for each channel (e.g. AV_SAMPLE_FMT_S16P).
-			 * In other words, this code will write only the first audio channel
-			 * in these cases.
-			 * You should use libswresample or libavfilter to convert the frame
-			 * to packed data. */
-			AddData( frame->extended_data[0], unpadded_linesize );
+			if( swr )
+			{
+				uint8_t *output = NULL;
+				int out_linesize = 0;
+				av_samples_alloc( &output, &out_linesize, audio_dec_ctx->channels, frame->nb_samples, AV_SAMPLE_FMT_S16, 0 );
+				swr_convert( swr, &output, frame->nb_samples, (const uint8_t **) frame->data, frame->nb_samples );
+				AddData( output, out_linesize );
+				av_freep( &output );
+			}
+			else
+				/* Write the raw audio data samples of the first plane. This works
+				 * fine for packed formats (e.g. AV_SAMPLE_FMT_S16). However,
+				 * most audio decoders output planar audio, which uses a separate
+				 * plane of audio samples for each channel (e.g. AV_SAMPLE_FMT_S16P).
+				 * In other words, this code will write only the first audio channel
+				 * in these cases.
+				 * You should use libswresample or libavfilter to convert the frame
+				 * to packed data. */
+				AddData( frame->extended_data[0], unpadded_linesize );
 		}
 	}
 

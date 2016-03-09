@@ -1,6 +1,5 @@
 #define __STDC_CONSTANT_MACROS
 #define __STDC_FORMAT_MACROS
-
 #include <stdint.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -15,11 +14,6 @@
 #include <string>
 #include <SDL/SDL.h>
 #include <SDL/SDL_audio.h>
-
-#ifdef USE_SDL_MIXER
-#include <SDL/SDL_mixer.h>
-#endif
-
 #include "AudioFile.h"
 #include "PlaybackBuffer.h"
 
@@ -27,11 +21,21 @@ class Song;
 class SongLoadData;
 class UserData;
 
+namespace ResampleMethod
+{
+	enum
+	{
+		Auto = 0,
+		Nearest,
+		Cubic
+	};
+}
+
 int SongLoad( void *data_ptr );
 double LinearCrossfade( double a, double b, double b_percent );
 double EqualPowerCrossfade( double a, double b, double b_percent );
 Sint16 Finalize( double value );
-bool CalculateCrossfade( Song *current_song, const Song *next_song, double *crossfade_for_beats, double *crossfade_at_beat );
+bool CalculateCrossfade( const Song *current_song, const Song *next_song, double *crossfade_for_beats, double *crossfade_at_beat );
 void AudioCallback( void *userdata, Uint8* stream, int len );
 void BufferedAudioCallback( void *userdata, Uint8* stream, int len );
 std::deque<std::string> DirSongs( std::string path );
@@ -53,17 +57,6 @@ std::deque<std::string> DirSongs( std::string path );
 #endif
 
 
-namespace ResampleMethod
-{
-	enum
-	{
-		Auto = 0,
-		Nearest,
-		Cubic
-	};
-}
-
-
 // --------------------------------------------------------------------------------------
 
 
@@ -76,53 +69,25 @@ public:
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
 
-#ifdef USE_SDL_MIXER
-	Song( std::string filename, const SDL_AudioSpec *spec )
-#else
 	Song( std::string filename )
-#endif
 	{
 		BPM = 140.;
 		CurrentFrame = 0.;
 		MaxFrame = 0.;
 		FirstBeatFrame = 0.;
 		FirstOutroFrame = 0.;
-		IntroBeats = 0;
-		OutroBeats = 0;
+		IntroBeats = 96;
+		OutroBeats = 128;
 		
-		bool loaded = false;
-#ifdef USE_SDL_MIXER
-		if( ! loaded )
-			loaded = Audio.LoadWithSDLMixer( filename.c_str(), spec, false );
-#endif
-#ifdef USE_LIBAV
-		if( ! loaded )
-			loaded = Audio.LoadWithLibAV( filename.c_str() );
-#endif
-#if defined(USE_SDL_MIXER) && defined(USE_EXTERNAL_FFMPEG)
-		if( ! loaded )
-			loaded = Audio.LoadWithSDLMixer( filename.c_str(), spec, true );
-#endif
-		if( loaded )
+		if( Audio.Load( filename.c_str() ) )
 		{
 			MaxFrame = Audio.Size / (Audio.BytesPerSample * Audio.Channels);
 			
-			if( MaxFrame < 0.5 )
-			{
-				printf( "%s: zero-length\n", filename.c_str() );
+			if( (MaxFrame < 0.5) || (MaxFrame / (double) Audio.SampleRate < 30.) )
 				Audio.Clear();
-			}
-			else if( MaxFrame / (double) Audio.SampleRate < 30. )
-			{
-				printf( "%s: only %.1f sec long\n", filename.c_str(), MaxFrame / (double) Audio.SampleRate );
-				Audio.Clear();
-			}
 		}
 		else
-		{
 			MaxFrame = 0.;
-			printf( "%s: %s\n", filename.c_str(), Audio.Error );
-		}
 	}
 	
 	~Song()
@@ -214,9 +179,9 @@ public:
 		return beat * (60. * Audio.SampleRate) / BPM + FirstBeatFrame;
 	}
 	
-	double NearestBeatFrameAtFrame( double frame )
+	double NearestBeatFrameAtFrame( double frame ) const
 	{
-		std::map<size_t,double>::iterator exact_beat_found = Beats.find( (size_t)( frame + 0.5 ) );
+		std::map<size_t,double>::const_iterator exact_beat_found = Beats.find( (size_t)( frame + 0.5 ) );
 		if( exact_beat_found != Beats.end() )
 		{
 			// We found an exact match.
@@ -227,11 +192,8 @@ public:
 		{
 			// No exact match, check for beats near where we guessed.
 			
-			Beats[ frame ] = 0.;
-			std::map<size_t,double>::iterator temp = Beats.find( frame );
-			std::map<size_t,double>::iterator ahead = temp;
-			ahead ++;
-			std::map<size_t,double>::reverse_iterator behind(temp);
+			std::map<size_t,double>::const_iterator ahead = Beats.lower_bound( frame );
+			std::map<size_t,double>::const_reverse_iterator behind( ahead );
 			behind ++;
 			
 			double nearest_beat = 0.;
@@ -249,23 +211,21 @@ public:
 				off_by = ahead->first - frame;
 			}
 			
-			Beats.erase( temp );
-			
 			return nearest_beat;
 		}
 	}
 	
-	double NearestBeatFrameAtBeat( double beat )
+	double NearestBeatFrameAtBeat( double beat ) const
 	{
 		return NearestBeatFrameAtFrame( FrameAtBeat( beat ) );
 	}
 	
-	double NearestBeatAtFrame( double frame )
+	double NearestBeatAtFrame( double frame ) const
 	{
 		return BeatAtFrame( NearestBeatFrameAtFrame( frame ) );
 	}
 	
-	double NearestBeatAtBeat( double beat )
+	double NearestBeatAtBeat( double beat ) const
 	{
 		return BeatAtFrame( NearestBeatFrameAtBeat( beat ) );
 	}
@@ -564,7 +524,6 @@ class SongLoadData
 {
 public:
 	bool Finished;
-	time_t StartSecs;
 	UserData *UD;
 	std::string Filename;
 	Song *LoadingSong;
@@ -572,7 +531,6 @@ public:
 	SongLoadData( UserData *ud, std::string filename )
 	{
 		Finished = false;
-		StartSecs = time(NULL);
 		UD = ud;
 		Filename = filename;
 		LoadingSong = NULL;
@@ -608,7 +566,6 @@ public:
 	{
 		Playing = false;
 		memset( &Spec, 0, sizeof(Spec) );
-		//memset( &Info, 0, sizeof(Info) );
 		BPM = 140.;
 		SourceBPM = true;
 		SourcePitchScale = 1.;
@@ -688,13 +645,9 @@ int SongLoad( void *data_ptr )
 	
 	// Wait 10ms before beginning to load song.
 	SDL_Delay( 10 );
-
-#ifdef USE_SDL_MIXER
-	data->LoadingSong = new Song( data->Filename, &(data->UD->Spec) );
-#else
+	
 	data->LoadingSong = new Song( data->Filename );
-#endif
-
+	
 	// Make sure it loaded okay.
 	if( data->LoadingSong->Audio.Data && data->LoadingSong->Audio.Size )
 	{
@@ -754,29 +707,22 @@ Sint16 Finalize( double value )
 // --------------------------------------------------------------------------------------
 
 
-bool CalculateCrossfade( Song *current_song, const Song *next_song, double *crossfade_for_beats, double *crossfade_at_beat )
+bool CalculateCrossfade( const Song *current_song, const Song *next_song, double *crossfade_for_beats, double *crossfade_at_beat )
 {
 	if( !( current_song && next_song ) )
 		return false;
 	
 	double current_total_beats = current_song->TotalBeats();
 	
-	// Default to 96 beats for crossfade, but allow override from the songs.
-	if( (current_song->OutroBeats > 0) && (next_song->IntroBeats > 0) )
-		*crossfade_for_beats = std::min<int>( current_song->OutroBeats, next_song->IntroBeats );
-	else if( current_song->OutroBeats > 0 )
-		*crossfade_for_beats = current_song->OutroBeats;
-	else if( next_song->IntroBeats > 0 )
-		*crossfade_for_beats = next_song->IntroBeats;
-	else
-		*crossfade_for_beats = 96.;
+	// Use the minimum of the intro and outro beats for crossfade length.
+	*crossfade_for_beats = std::min<int>( current_song->OutroBeats, next_song->IntroBeats );
 	
-	// If FirstOutroFrame is not specified, guess a good crossfade point.
 	if( current_song->FirstOutroFrame )
 		*crossfade_at_beat = current_song->BeatAtFrame( current_song->FirstOutroFrame );
 	else
 	{
-		double expected_beat = current_total_beats - fmod( current_total_beats, 16. ) - *crossfade_for_beats;
+		// If FirstOutroFrame is not specified, guess a good crossfade point.
+		double expected_beat = current_total_beats - fmod( current_total_beats, 16. ) - current_song->OutroBeats;
 		double actual_beat = current_song->NearestBeatAtBeat( expected_beat );
 		*crossfade_at_beat = (fabs( actual_beat - expected_beat ) < 32.) ? actual_beat : expected_beat;
 	}
@@ -1007,9 +953,9 @@ int main( int argc, char **argv )
 	{
 		char cmd[ 102400 ] = "";
 		#ifdef WIN32
-			const char *DEFAULT_ARGS = "\"M:\\iTunes\\iTunes\\ Music\\Trance\" \"M:\\BeatPort AIFF\"";
+			const char *DEFAULT_ARGS = "\"M:\\iTunes\\iTunes\\ Music\\Trance\"";
 		#else
-			const char *DEFAULT_ARGS = "~/Music/iTunes/iTunes\\ Music/*Trance* /Volumes/Media/Music/iTunes/iTunes\\ Music/*Trance* /Volumes/Media/Music/BeatPort\\ AIFF &";
+			const char *DEFAULT_ARGS = "~/Music/iTunes/iTunes\\ Music/Trance /Volumes/Media/Music/iTunes/iTunes\\ Music/Trance &";
 		#endif
 		snprintf( cmd, 102400, "\"%s\" %s", argv[ 0 ], DEFAULT_ARGS );
 		system( cmd );
@@ -1019,6 +965,9 @@ int main( int argc, char **argv )
 	UserData userdata;
 	bool shuffle = true;
 	bool window = true;
+	bool fullscreen = false;
+	bool visualizer = true;
+	bool playback = true;
 	const char *write = NULL;
 	SDL_AudioSpec want;
 	memset( &want, 0, sizeof(want) );
@@ -1034,21 +983,21 @@ int main( int argc, char **argv )
 	{
 		if( strncmp( argv[ i ], "--", 2 ) == 0 )
 		{
-			if( strcasecmp( argv[ i ], "--metronome" ) == 0 )
-				userdata.Metronome = true;
+			if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
+				window = false;
+			else if( strcasecmp( argv[ i ], "--fullscreen" ) == 0 )
+			{
+				window = true;
+				fullscreen = true;
+			}
+			else if( strcasecmp( argv[ i ], "--no-visualizer" ) == 0 )
+				visualizer = false;
 			else if( strcasecmp( argv[ i ], "--no-shuffle" ) == 0 )
 				shuffle = false;
 			else if( strcasecmp( argv[ i ], "--no-repeat" ) == 0 )
 				userdata.Repeat = false;
-			else if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
-				window = false;
-			else if( strcasecmp( argv[ i ], "--bpm=source" ) == 0 )
-				userdata.SourceBPM = true;
-			else if( strncasecmp( argv[ i ], "--bpm=", strlen("--bpm=") ) == 0 )
-			{
-				userdata.BPM = atof( argv[ i ] + strlen("--bpm=") );
-				userdata.SourceBPM = false;
-			}
+			else if( strcasecmp( argv[ i ], "--metronome" ) == 0 )
+				userdata.Metronome = true;
 			else if( strncasecmp( argv[ i ], "--pitch=", strlen("--pitch=") ) == 0 )
 			{
 				const char *pitch = argv[ i ] + strlen("--pitch=");
@@ -1057,10 +1006,17 @@ int main( int argc, char **argv )
 				userdata.SourcePitchScale = pow( 2., atof(pitch) / 12. );
 				userdata.SourceBPM = true;
 			}
+			else if( strncasecmp( argv[ i ], "--bpm=", strlen("--bpm=") ) == 0 )
+			{
+				userdata.BPM = atof( argv[ i ] + strlen("--bpm=") );
+				userdata.SourceBPM = false;
+			}
 			else if( strncasecmp( argv[ i ], "--volume=", strlen("--volume=") ) == 0 )
 				userdata.Volume = atof( argv[ i ] + strlen("--volume=") );
 			else if( strncasecmp( argv[ i ], "--rate=", strlen("--rate=") ) == 0 )
 				want.freq = atoi( argv[ i ] + strlen("--rate=") );
+			else if( strncasecmp( argv[ i ], "--channels=", strlen("--channels=") ) == 0 )
+				want.channels = atoi( argv[ i ] + strlen("--channels=") );
 			else if( strncasecmp( argv[ i ], "--buffer1=", strlen("--buffer1=") ) == 0 )
 				want.samples = atoi( argv[ i ] + strlen("--buffer1=") );
 			else if( strncasecmp( argv[ i ], "--buffer2=", strlen("--buffer2=") ) == 0 )
@@ -1071,6 +1027,8 @@ int main( int argc, char **argv )
 				else
 					want.callback = AudioCallback;
 			}
+			else if( strcasecmp( argv[ i ], "--no-playback" ) == 0 )
+				playback = false;
 			else if( strncasecmp( argv[ i ], "--write=", strlen("--write=") ) == 0 )
 				write = argv[ i ] + strlen("--write=");
 			else
@@ -1103,23 +1061,29 @@ int main( int argc, char **argv )
 	if( window )
 		sdl_flags |= SDL_INIT_VIDEO;
 	
-	// Initialize SDL and open the audio output.
+	// Initialize SDL.
 	SDL_Init( sdl_flags );
+	SDL_Surface *screen = NULL;
 	if( window )
 	{
 		SDL_WM_SetCaption( "Raptor007's AutoDJ", "AutoDJ" );
-		SDL_SetVideoMode( 200, 50, 0, 0 );
+		screen = fullscreen ? SDL_SetVideoMode( 0, 0, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE );
 	}
 	userdata.Buffer.Callback = AudioCallback;
-#ifdef USE_SDL_MIXER
-	Mix_OpenAudio( want.freq, want.format, want.channels, want.samples );
-	SDL_CloseAudio();
-#endif
-	SDL_OpenAudio( &want, &(userdata.Spec) );
+	
+	// Prepare audio file input.
+	av_log_set_level( AV_LOG_FATAL );
+	av_register_all();
 	
 	// Shuffle song list if requested.
 	if( shuffle )
 		std::random_shuffle( userdata.Queue.begin(), userdata.Queue.end() );
+	
+	// Prepare audio output.
+	if( playback )
+		SDL_OpenAudio( &want, &(userdata.Spec) );
+	else
+		memcpy( &(userdata.Spec), &want, sizeof(want) );
 	
 	if( write )
 	{
@@ -1129,6 +1093,9 @@ int main( int argc, char **argv )
 		fwrite( wave_header, 1, 44, userdata.WriteTo );
 		fflush( userdata.WriteTo );
 	}
+	
+	// Keep track of visualizer's progress.
+	size_t visualizer_start_sample = 0;
 	
 	// Keep running until playback is complete.
 	bool running = (userdata.Queue.size() || userdata.Songs.size());
@@ -1165,15 +1132,25 @@ int main( int argc, char **argv )
 					else if( key == SDLK_m )
 						userdata.Metronome = ! userdata.Metronome;
 					else if( key == SDLK_LEFTBRACKET )
-						userdata.Songs.front()->CurrentFrame = 0;
+					{
+						Song *current_song = userdata.Songs.front();
+						current_song->CurrentFrame = 0.;
+						current_song->FirstOutroFrame = 0.;
+						current_song->OutroBeats = 0;
+					}
 					else if( key == SDLK_RIGHTBRACKET )
 					{
 						Song *current_song = userdata.Songs.front();
 						int beat = current_song->Beat();
-						double expected_beat = beat - (beat % 16);
-						double actual_beat = current_song->NearestBeatAtBeat( expected_beat );
-						current_song->FirstOutroFrame = current_song->FrameAtBeat( (fabs( actual_beat - expected_beat ) < 32.) ? actual_beat : expected_beat );
-						current_song->OutroBeats = std::min<int>( 64, current_song->TotalBeats() - beat );
+						if( current_song->FirstOutroFrame && (current_song->FrameAtBeat(beat) >= current_song->FirstOutroFrame) )
+							current_song->OutroBeats /= 2;
+						else
+						{
+							double expected_beat = beat - (beat % 16);
+							double actual_beat = current_song->NearestBeatAtBeat( expected_beat );
+							current_song->FirstOutroFrame = current_song->FrameAtBeat( (fabs( actual_beat - expected_beat ) < 32.) ? actual_beat : expected_beat );
+							current_song->OutroBeats = std::min<int>( 64, current_song->TotalBeats() - beat );
+						}
 					}
 					else if( key == SDLK_BACKSLASH )
 						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->MaxFrame;
@@ -1251,6 +1228,24 @@ int main( int argc, char **argv )
 							printf( "Resample: Nearest\n" );
 						}
 					}
+					else if( key == SDLK_v )
+					{
+						visualizer = ! visualizer;
+						
+						if( screen && ! visualizer )
+						{
+							Uint32 bg = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+							Uint32* pixels = (Uint32*) screen->pixels;
+							SDL_LockSurface( screen );
+							for( int x = 0; x < screen->w; x ++ )
+							{
+								for( int y = 0; y < screen->h; y ++ )
+									pixels[ y * screen->w + x ] = bg;
+							}
+							SDL_UnlockSurface( screen );
+							SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
+						}
+					}
 					else if( key == SDLK_q )
 					{
 						running = false;
@@ -1262,13 +1257,56 @@ int main( int argc, char **argv )
 		
 		if( userdata.Buffer.BufferSize )
 		{
-			// Add some data to the playback buffer and wait 10ms.
+			// Add some data to the playback buffer.
 			userdata.Buffer.AddToBuffer( &userdata, 16384 );
+			
+			// Visualize the waveform in the window.
+			if( visualizer && screen )
+			{
+				if( userdata.Playing )
+				{
+					visualizer_start_sample += screen->w * userdata.Spec.channels;
+					visualizer_start_sample %= userdata.Buffer.BufferSize / 2;
+				}
+				Uint32 fg = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+				Uint32* pixels = (Uint32*) screen->pixels;
+				SDL_LockSurface( screen );
+				for( int x = 0; x < screen->w; x ++ )
+				{
+					// Fade the previous pixel value through shades of blue.
+					for( int y = 0; y < screen->h; y ++ )
+					{
+						Uint8 r = 0x00, g = 0x00, b = 0x00;
+						SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
+						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, 0x00, std::min<int>( 0x7F, g * 0.5f ), std::min<int>( 0xFF, (r + b) * 0.875f ) );
+					}
+					
+					// Fill in the waveform in white.
+					for( size_t c = 0; c < userdata.Spec.channels; c ++ )
+					{
+						Sint16 raw = ((Sint16*)( userdata.Buffer.Buffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + c) % (userdata.Buffer.BufferSize / 2) ];
+						int y = screen->h * (1.f - (raw + 32767.f) / 65534.f);
+						pixels[ y * screen->w + x ] = fg;
+					}
+				}
+				SDL_UnlockSurface( screen );
+				SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
+			}
+			
+			// Wait 10ms.
 			SDL_Delay( 10 );
 		}
 		else
 			// Not buffering playback, so delay 100ms.
 			SDL_Delay( 100 );
+		
+		// If we're not playing back audio, advance by 1024 bytes.
+		// This is mostly for valgrind debugging to avoid alsa buffer underrun warnings.
+		if(unlikely( ! playback ))
+		{
+			Uint8 buffer[ 1024 ];
+			want.callback( (void*) &userdata, buffer, 1024 );
+		}
 		
 		running = running && (userdata.Queue.size() || userdata.Songs.size() || userdata.Buffer.Buffered);
 	}

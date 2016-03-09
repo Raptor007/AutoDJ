@@ -10,4 +10,5 @@
 *.xcuserstate
 *.o
 *.app
+*.dSYM
 AutoDJ

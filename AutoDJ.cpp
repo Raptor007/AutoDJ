@@ -1285,7 +1285,11 @@ int main( int argc, char **argv )
 					for( size_t c = 0; c < userdata.Spec.channels; c ++ )
 					{
 						Sint16 raw = ((Sint16*)( userdata.Buffer.Buffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + c) % (userdata.Buffer.BufferSize / 2) ];
-						int y = screen->h * (1.f - (raw + 32767.f) / 65534.f);
+						float amplitude = raw / 32767.f;
+						float volume = userdata.Volume;
+						if( (volume > 0.f) && (volume < 1.f) )
+							amplitude /= volume;
+						int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
 						pixels[ y * screen->w + x ] = fg;
 					}
 				}

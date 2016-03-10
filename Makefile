@@ -3,7 +3,7 @@ CC = $(PREFIX)/bin/g++
 O = 2
 CFLAGS = -O$(O) -g -march=native -mfpmath=sse -fomit-frame-pointer -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing
 INC = $(PREFIX)/include $(PREFIX)/include/SDL
-LIB = libSDLmain.a libSDL.so ../local/lib/libavdevice.a ../local/lib/libavformat.a ../local/lib/libavfilter.a ../local/lib/libavcodec.a ../local/lib/libavresample.a ../local/lib/libswscale.a ../local/lib/libavutil.a liblzma.so libbz2.a libz.a
+LIB = libSDLmain.a libSDL.so ../local/lib/libavdevice.a ../local/lib/libavformat.a ../local/lib/libavfilter.a ../local/lib/libavcodec.a ../local/lib/libavresample.a ../local/lib/libswscale.a ../local/lib/libavutil.a ../local/lib/libswresample.a liblzma.so libbz2.a libz.a
 LIBDIR = $(PREFIX)/lib
 ifeq ($(shell uname -m), x86_64)
 LIBDIR = $(PREFIX)/lib64
@@ -30,7 +30,7 @@ PREFIX = /mingw
 CFLAGS += -mwindows -static-libgcc -static-libstdc++
 LIBDIR = $(PREFIX)/lib
 LIB = libiconv.a
-LIBRARIES := -lmingw32 -lSDLmain -lSDL -lavdevice -lavformat -lavfilter -lavcodec -lavresample -lswscale -lavutil $(LIBRARIES) -lws2_32 -lsecur32
+LIBRARIES := -lmingw32 -lSDLmain -lSDL -lavdevice -lavformat -lavfilter -lavcodec -lavresample -lswscale -lavutil -lswresample $(LIBRARIES) -lws2_32 -lsecur32
 TARGET = AutoDJ.exe
 INSTALL_DIR = /usr/bin
 endif

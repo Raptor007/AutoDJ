@@ -20,7 +20,7 @@ public:
 	~AudioFile();
 	
 	void Clear( void );
-	void AddData( uint8_t *add_data, size_t add_size );
+	bool AddData( uint8_t *add_data, size_t add_size );
 	bool Load( const char *filename );
 
 private:
@@ -31,8 +31,10 @@ private:
 	AVFrame *frame;
 	AVPacket pkt;
 	int audio_frame_count;
+	int decoded;
+	int got_frame;
 	AVAudioResampleContext *avr;
 	
-	int decode_packet( int *got_frame );
-	int open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, enum AVMediaType type );
+	bool decode_packet( void );
+	bool open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, enum AVMediaType type );
 };

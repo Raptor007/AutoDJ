@@ -35,22 +35,27 @@ void AudioFile::Clear( void )
 	audio_stream_idx = -1;
 	frame = NULL;
 	audio_frame_count = 0;
+	decoded = 0;
+	got_frame = 0;
 	avr = NULL;
 }
 
 
-void AudioFile::AddData( uint8_t *add_data, size_t add_size )
+bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 {
-	if( !( add_data && add_size ) )
-		return;
+	// Technically adding 0 bytes isn't an error, but reading from NULL is.
+	if( ! add_size )
+		return true;
+	if( ! add_data )
+		return false;
 	
 	// Make sure we have enough room for the new data.
 	if( Allocated < Size + add_size )
 	{
 		size_t need_size = add_size + Size - Allocated;
 		
-		// Allocate in 1MB chunks to reduce the number of times we have to do it.
-		#define CHUNK_SIZE (1024*1024)
+		// Allocate in 16MB chunks to reduce the number of times we have to do it.
+		#define CHUNK_SIZE (16*1024*1024)
 		if( need_size % CHUNK_SIZE )
 			need_size += CHUNK_SIZE - (need_size % CHUNK_SIZE);
 		
@@ -77,14 +82,15 @@ void AudioFile::AddData( uint8_t *add_data, size_t add_size )
 		// Add data to the buffer.
 		memcpy( Data + Size, add_data, add_size );
 		Size += add_size;
+		return true;
 	}
+	
+	return false;
 }
 
 
 bool AudioFile::Load( const char *filename )
 {
-	int ret = 0, got_frame = 0;
-	
 	// open input file, and allocate format context
 	if( avformat_open_input( &fmt_ctx, filename, NULL, NULL ) < 0 )
 		return false;
@@ -93,15 +99,19 @@ bool AudioFile::Load( const char *filename )
 	if( avformat_find_stream_info( fmt_ctx, NULL ) < 0 )
 		return false;
 	
-	if( open_codec_context( &audio_stream_idx, fmt_ctx, AVMEDIA_TYPE_AUDIO ) >= 0 )
+	if( open_codec_context( &audio_stream_idx, fmt_ctx, AVMEDIA_TYPE_AUDIO ) )
 		audio_stream = fmt_ctx->streams[ audio_stream_idx ];
 	if( ! audio_stream )
-	{
-		ret = 1;
 		goto end;
-	}
 	
 	audio_dec_ctx = audio_stream->codec;
+	
+	frame = av_frame_alloc();
+	if( ! frame )
+	{
+		audio_stream = NULL;
+		goto end;
+	}
 	
 	// We want interleaved 16-bit in the original channel layout and sample rate.
 	if( audio_dec_ctx->sample_fmt != AV_SAMPLE_FMT_S16 )
@@ -113,67 +123,52 @@ bool AudioFile::Load( const char *filename )
 		av_opt_set_int( avr, "out_sample_rate",    audio_dec_ctx->sample_rate,    0 );
 		av_opt_set_int( avr, "in_sample_fmt",      audio_dec_ctx->sample_fmt,     0 );
 		av_opt_set_int( avr, "out_sample_fmt",     AV_SAMPLE_FMT_S16,             0 );
-		if( avresample_open(avr) )
+		if( avresample_open(avr) < 0 )
 		{
 			avresample_free( &avr );
 			avr = NULL;
 		}
 	}
-
-	frame = av_frame_alloc();
-	if( ! frame )
-	{
-		ret = AVERROR(ENOMEM);
-		goto end;
-	}
-
+	
 	// initialize packet, set data to NULL, let the demuxer fill it
 	av_init_packet( &pkt );
 	pkt.data = NULL;
 	pkt.size = 0;
-
+	
 	// read frames from the file
 	while( av_read_frame( fmt_ctx, &pkt ) >= 0 )
 	{
 		AVPacket orig_pkt = pkt;
 		do
 		{
-			ret = decode_packet( &got_frame );
-			if( ret < 0 )
+			if( ! decode_packet() )
 				break;
-			pkt.data += ret;
-			pkt.size -= ret;
+			pkt.data += decoded;
+			pkt.size -= decoded;
 		}
 		while( pkt.size > 0 );
 		av_packet_unref( &orig_pkt );
 	}
-
+	
 	// flush cached frames
 	pkt.data = NULL;
 	pkt.size = 0;
 	do
 	{
-		decode_packet( &got_frame );
+		decode_packet();
 	}
 	while( got_frame );
-
-	if( audio_stream )
-	{
-		enum AVSampleFormat sfmt = audio_dec_ctx->sample_fmt;
-		
-		if( av_sample_fmt_is_planar(sfmt) && ! avr )
-			Channels = 1;
-		else
-			Channels = audio_dec_ctx->channels;
-		
-		SampleRate = audio_dec_ctx->sample_rate;
-		
-		if( ! avr )
-			BytesPerSample = av_get_bytes_per_sample( sfmt );
-		
-		ret = 0;
-	}
-
+	
+	if( av_sample_fmt_is_planar(audio_dec_ctx->sample_fmt) && ! avr )
+		Channels = 1;
+	else
+		Channels = audio_dec_ctx->channels;
+	
+	SampleRate = audio_dec_ctx->sample_rate;
+	
+	if( ! avr )
+		BytesPerSample = av_get_bytes_per_sample( audio_dec_ctx->sample_fmt );
+	
 end:
 	if( audio_dec_ctx )
 		avcodec_close( audio_dec_ctx );
@@ -186,27 +181,26 @@ end:
 		avresample_close( avr );
 		avresample_free( &avr );
 	}
-
-	return !(ret < 0);
+	
+	return audio_stream;
 }
 
 
 // --------------------------------------------------------------------------------------
 
 
-int AudioFile::decode_packet( int *got_frame )
+bool AudioFile::decode_packet()
 {
-	int ret = 0;
-	int decoded = pkt.size;
-
-	*got_frame = 0;
-
+	decoded = pkt.size;
+	
+	got_frame = 0;
+	
 	if( pkt.stream_index == audio_stream_idx )
 	{
 		// decode audio frame
-		ret = avcodec_decode_audio4( audio_dec_ctx, frame, got_frame, &pkt );
+		int ret = avcodec_decode_audio4( audio_dec_ctx, frame, &got_frame, &pkt );
 		if( ret < 0 )
-			return ret;
+			return false;
 		
 		// Some audio decoders decode only part of the packet, and have to be
 		// called again with the remainder of the packet data.
@@ -214,7 +208,7 @@ int AudioFile::decode_packet( int *got_frame )
 		// Also, some decoders might over-read the packet.
 		decoded = FFMIN( ret, pkt.size );
 		
-		if( *got_frame )
+		if( got_frame )
 		{
 			size_t unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample( (AVSampleFormat) frame->format );
 			audio_frame_count ++;
@@ -233,41 +227,43 @@ int AudioFile::decode_packet( int *got_frame )
 				AddData( frame->extended_data[ 0 ], unpadded_linesize );
 		}
 	}
-
-	return decoded;
+	
+	return true;
 }
 
 
-int AudioFile::open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, enum AVMediaType type )
+bool AudioFile::open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, enum AVMediaType type )
 {
-	int ret = 0, stream_index = 0;
+	int stream_index = 0;
 	AVStream *st = NULL;
 	AVCodecContext *dec_ctx = NULL;
 	AVCodec *dec = NULL;
 	AVDictionary *opts = NULL;
 
-	ret = av_find_best_stream( fmt_ctx, type, -1, -1, NULL, 0 );
-	if( ret < 0 )
-		return ret;
+	stream_index = av_find_best_stream( fmt_ctx, type, -1, -1, NULL, 0 );
+	if( stream_index < 0 )
+	{
+		stream_index = 0;
+		return false;
+	}
 	else
 	{
-		stream_index = ret;
 		st = fmt_ctx->streams[ stream_index ];
 		
 		// find decoder for the stream
 		dec_ctx = st->codec;
 		dec = avcodec_find_decoder( dec_ctx->codec_id );
 		if( ! dec )
-			return AVERROR(EINVAL);
+			return false;
 		
 		// Init the decoders, without reference counting
 		av_dict_set( &opts, "refcounted_frames", "0", 0 );
 		
-		if( (ret = avcodec_open2( dec_ctx, dec, &opts )) < 0)
-			return ret;
+		if( avcodec_open2( dec_ctx, dec, &opts ) < 0 )
+			return false;
 		
 		*stream_idx = stream_index;
 	}
 
-	return 0;
+	return true;
 }

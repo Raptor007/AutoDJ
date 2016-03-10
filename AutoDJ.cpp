@@ -395,11 +395,8 @@ public:
 					{
 						// No exact match, check for beats near where we guessed.
 						
-						Beats[ frame ] = 0.;
-						std::map<size_t,double>::iterator temp = Beats.find( frame );
-						std::map<size_t,double>::iterator ahead = temp;
-						ahead ++;
-						std::map<size_t,double>::reverse_iterator behind(temp);
+						std::map<size_t,double>::const_iterator ahead = Beats.lower_bound( frame );
+						std::map<size_t,double>::const_reverse_iterator behind( ahead );
 						behind ++;
 						
 						if( (behind != Beats.rend()) && (frame - behind->first < frame_skip / 2) )
@@ -429,8 +426,6 @@ public:
 						}
 						else
 							misses_ahead ++;
-						
-						Beats.erase( temp );
 					}
 					
 					// Assume the first beat of the first detected pair is the first real beat.
@@ -1096,6 +1091,7 @@ int main( int argc, char **argv )
 	
 	// Keep track of visualizer's progress.
 	size_t visualizer_start_sample = 0;
+	size_t visualizer_loading_frame = 0;
 	
 	// Keep running until playback is complete.
 	bool running = (userdata.Queue.size() || userdata.Songs.size());
@@ -1261,40 +1257,58 @@ int main( int argc, char **argv )
 			userdata.Buffer.AddToBuffer( &userdata, 16384 );
 			
 			// Visualize the waveform in the window.
-			if( visualizer && screen )
+			if( visualizer && screen && (userdata.Playing || userdata.Songs.empty()) )
 			{
+				Uint32 white = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+				Uint32 yellow = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 );
+				Uint32* pixels = (Uint32*) screen->pixels;
+				SDL_LockSurface( screen );
+				for( int x = 0; x < screen->w; x ++ )
+				{
+					// Fade the previous pixel value.
+					for( int y = 0; y < screen->h; y ++ )
+					{
+						Uint8 r = 0x00, g = 0x00, b = 0x00;
+						SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
+						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f ), std::min<int>( 0xFF, b * 0.9375f ) );
+					}
+					
+					if( userdata.Playing )
+					{
+						// Fill in the waveform.
+						for( int c = userdata.Spec.channels - 1; c >= 0; c -- )
+						{
+							Sint16 raw = ((Sint16*)( userdata.Buffer.Buffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + c) % (userdata.Buffer.BufferSize / 2) ];
+							float amplitude = raw / 32767.f;
+							float volume = userdata.Volume;
+							if( (volume > 0.f) && (volume < 1.f) )
+								amplitude /= volume;
+							int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
+							pixels[ y * screen->w + x ] = (c % 2) ? yellow : white;
+						}
+					}
+					else
+					{
+						// Loading animation.
+						int y1 = ((screen->h - x) % screen->h + screen->h + visualizer_loading_frame) % screen->h;
+						int y2 = (y1 + screen->h / 2) % screen->h;
+						pixels[ y1 * screen->w + x ] = white;
+						pixels[ y2 * screen->w + x ] = yellow;
+					}
+				}
+				SDL_UnlockSurface( screen );
+				SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
+				
 				if( userdata.Playing )
 				{
 					visualizer_start_sample += screen->w * userdata.Spec.channels;
 					visualizer_start_sample %= userdata.Buffer.BufferSize / 2;
 				}
-				Uint32 fg = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
-				Uint32* pixels = (Uint32*) screen->pixels;
-				SDL_LockSurface( screen );
-				for( int x = 0; x < screen->w; x ++ )
+				else
 				{
-					// Fade the previous pixel value through shades of blue.
-					for( int y = 0; y < screen->h; y ++ )
-					{
-						Uint8 r = 0x00, g = 0x00, b = 0x00;
-						SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, 0x00, std::min<int>( 0x7F, g * 0.5f ), std::min<int>( 0xFF, (r + b) * 0.875f ) );
-					}
-					
-					// Fill in the waveform in white.
-					for( size_t c = 0; c < userdata.Spec.channels; c ++ )
-					{
-						Sint16 raw = ((Sint16*)( userdata.Buffer.Buffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + c) % (userdata.Buffer.BufferSize / 2) ];
-						float amplitude = raw / 32767.f;
-						float volume = userdata.Volume;
-						if( (volume > 0.f) && (volume < 1.f) )
-							amplitude /= volume;
-						int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
-						pixels[ y * screen->w + x ] = fg;
-					}
+					visualizer_loading_frame ++;
+					visualizer_loading_frame %= screen->h;
 				}
-				SDL_UnlockSurface( screen );
-				SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
 			}
 			
 			// Wait 10ms.

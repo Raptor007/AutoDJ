@@ -99,7 +99,7 @@ bool AudioFile::Load( const char *filename )
 	if( avformat_find_stream_info( fmt_ctx, NULL ) < 0 )
 		return false;
 	
-	if( open_codec_context( &audio_stream_idx, fmt_ctx, AVMEDIA_TYPE_AUDIO ) )
+	if( OpenAudioCodecContext() )
 		audio_stream = fmt_ctx->streams[ audio_stream_idx ];
 	if( ! audio_stream )
 		goto end;
@@ -141,7 +141,7 @@ bool AudioFile::Load( const char *filename )
 		AVPacket orig_pkt = pkt;
 		do
 		{
-			if( ! decode_packet() )
+			if( ! DecodePacket() )
 				break;
 			pkt.data += decoded;
 			pkt.size -= decoded;
@@ -155,7 +155,7 @@ bool AudioFile::Load( const char *filename )
 	pkt.size = 0;
 	do
 	{
-		decode_packet();
+		DecodePacket();
 	}
 	while( got_frame );
 	
@@ -189,7 +189,7 @@ end:
 // --------------------------------------------------------------------------------------
 
 
-bool AudioFile::decode_packet()
+bool AudioFile::DecodePacket( void )
 {
 	decoded = pkt.size;
 	
@@ -232,7 +232,7 @@ bool AudioFile::decode_packet()
 }
 
 
-bool AudioFile::open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, enum AVMediaType type )
+bool AudioFile::OpenAudioCodecContext( void )
 {
 	int stream_index = 0;
 	AVStream *st = NULL;
@@ -240,12 +240,9 @@ bool AudioFile::open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, e
 	AVCodec *dec = NULL;
 	AVDictionary *opts = NULL;
 
-	stream_index = av_find_best_stream( fmt_ctx, type, -1, -1, NULL, 0 );
+	stream_index = av_find_best_stream( fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0 );
 	if( stream_index < 0 )
-	{
-		stream_index = 0;
 		return false;
-	}
 	else
 	{
 		st = fmt_ctx->streams[ stream_index ];
@@ -262,7 +259,7 @@ bool AudioFile::open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, e
 		if( avcodec_open2( dec_ctx, dec, &opts ) < 0 )
 			return false;
 		
-		*stream_idx = stream_index;
+		audio_stream_idx = stream_index;
 	}
 
 	return true;

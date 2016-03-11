@@ -16,6 +16,9 @@
 #include <SDL/SDL_audio.h>
 #include "AudioFile.h"
 #include "PlaybackBuffer.h"
+#ifdef WAVEOUT
+#include <windows.h>
+#endif
 
 class Song;
 class SongLoadData;
@@ -738,7 +741,9 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	memset( stream, 0, len );
 	
 	UserData *ud = (UserData*) userdata;
-	if( ! ud->Playing )
+	
+	// If we're not filling an intermediate buffer and playback is paused, leave it silent.
+	if( !( ud->Playing || ud->Buffer.BufferSize ) )
 		return;
 	
 	// For simplicity's sake, assume it's always 16-bit audio output.
@@ -878,7 +883,10 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 void BufferedAudioCallback( void *userdata, Uint8* stream, int len )
 {
 	UserData *ud = (UserData*) userdata;
-	ud->Buffer.FillStream( userdata, stream, len );
+	if( ud->Playing )
+		ud->Buffer.FillStream( userdata, stream, len );
+	else
+		memset( stream, 0, len );
 }
 
 
@@ -941,6 +949,45 @@ std::deque<std::string> DirSongs( std::string path )
 // --------------------------------------------------------------------------------------
 
 
+#ifdef WAVEOUT
+
+HWAVEOUT WaveOutHandle = NULL;
+WAVEHDR WaveOutHeaders[ 2 ];
+Uint8 *WaveOutBuffers[ 2 ] = { NULL, NULL };
+int WaveOutBufferSize = 4096;
+int WaveOutBufferNum = 0;
+int WaveOutBuffersNeeded = 2;
+
+static void CALLBACK WaveOutCallback( HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2 )
+{
+	if( uMsg == WOM_DONE )
+		WaveOutBuffersNeeded = std::min<int>( 2, WaveOutBuffersNeeded + 1 );
+}
+
+static void WaveOutCheck( UserData *ud )
+{
+	while( WaveOutBuffersNeeded > 0 )
+	{
+		WaveOutBuffersNeeded --;
+		
+		// Fill the next buffer.
+		ud->Spec.callback( ud, WaveOutBuffers[ WaveOutBufferNum ], WaveOutBufferSize );
+		
+		// Start playing the buffer.
+		waveOutWrite( WaveOutHandle, &(WaveOutHeaders[ WaveOutBufferNum ]), sizeof(WAVEHDR) );
+		
+		// Swap buffers.
+		WaveOutBufferNum ++;
+		WaveOutBufferNum %= 2;
+	}
+}
+
+#endif
+
+
+// --------------------------------------------------------------------------------------
+
+
 int main( int argc, char **argv )
 {
 	// If no arguments were given, search the default music directory.
@@ -963,6 +1010,7 @@ int main( int argc, char **argv )
 	bool fullscreen = false;
 	bool visualizer = true;
 	bool playback = true;
+	bool sdl_audio = true;
 	const char *write = NULL;
 	SDL_AudioSpec want;
 	memset( &want, 0, sizeof(want) );
@@ -1015,13 +1063,7 @@ int main( int argc, char **argv )
 			else if( strncasecmp( argv[ i ], "--buffer1=", strlen("--buffer1=") ) == 0 )
 				want.samples = atoi( argv[ i ] + strlen("--buffer1=") );
 			else if( strncasecmp( argv[ i ], "--buffer2=", strlen("--buffer2=") ) == 0 )
-			{
 				userdata.Buffer.SetSize( atoi( argv[ i ] + strlen("--buffer2=") ) * 2 * want.channels );
-				if( userdata.Buffer.BufferSize > 0 )
-					want.callback = BufferedAudioCallback;
-				else
-					want.callback = AudioCallback;
-			}
 			else if( strcasecmp( argv[ i ], "--no-playback" ) == 0 )
 				playback = false;
 			else if( strncasecmp( argv[ i ], "--write=", strlen("--write=") ) == 0 )
@@ -1064,7 +1106,6 @@ int main( int argc, char **argv )
 		SDL_WM_SetCaption( "Raptor007's AutoDJ", "AutoDJ" );
 		screen = fullscreen ? SDL_SetVideoMode( 0, 0, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE );
 	}
-	userdata.Buffer.Callback = AudioCallback;
 	
 	// Prepare audio file input.
 	av_log_set_level( AV_LOG_FATAL );
@@ -1075,10 +1116,56 @@ int main( int argc, char **argv )
 		std::random_shuffle( userdata.Queue.begin(), userdata.Queue.end() );
 	
 	// Prepare audio output.
-	if( playback )
-		SDL_OpenAudio( &want, &(userdata.Spec) );
+	userdata.Buffer.Callback = AudioCallback;
+	if( userdata.Buffer.BufferSize > 0 )
+		want.callback = BufferedAudioCallback;
 	else
-		memcpy( &(userdata.Spec), &want, sizeof(want) );
+		want.callback = AudioCallback;
+	memcpy( &(userdata.Spec), &want, sizeof(want) );
+	if( playback )
+	{
+#ifdef WAVEOUT
+		int wave_out_devices = waveOutGetNumDevs();
+		if( wave_out_devices )
+		{
+			// Start WaveOut.
+			WAVEFORMATEX wfx;
+			memset( &wfx, 0, sizeof(WAVEFORMATEX) );
+			wfx.wFormatTag = WAVE_FORMAT_PCM;
+			wfx.wBitsPerSample = 16;
+			wfx.nChannels = want.channels;
+			wfx.nSamplesPerSec = want.freq;
+			wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
+			wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
+			wfx.cbSize = 0;
+			MMRESULT wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+			if( wave_out_result == MMSYSERR_NOERROR )
+			{
+				// Allocate 2 output buffers.
+				WaveOutBufferSize = want.samples * wfx.nChannels * wfx.wBitsPerSample / 8;
+				WaveOutBuffers[ 0 ] = (Uint8*) malloc( WaveOutBufferSize );
+				WaveOutBuffers[ 1 ] = (Uint8*) malloc( WaveOutBufferSize );
+				memset( WaveOutBuffers[ 0 ], 0, WaveOutBufferSize );
+				memset( WaveOutBuffers[ 1 ], 0, WaveOutBufferSize );
+				memset( &(WaveOutHeaders[ 0 ]), 0, sizeof(WAVEHDR) );
+				memset( &(WaveOutHeaders[ 1 ]), 0, sizeof(WAVEHDR) );
+				WaveOutHeaders[ 0 ].lpData = (HPSTR) WaveOutBuffers[ 0 ];
+				WaveOutHeaders[ 1 ].lpData = (HPSTR) WaveOutBuffers[ 1 ];
+				WaveOutHeaders[ 0 ].dwBufferLength = WaveOutBufferSize;
+				WaveOutHeaders[ 1 ].dwBufferLength = WaveOutBufferSize;
+				int error = waveOutPrepareHeader( WaveOutHandle, &(WaveOutHeaders[ 0 ]), sizeof(WAVEHDR) );
+				if( ! error )
+					error = waveOutPrepareHeader( WaveOutHandle, &(WaveOutHeaders[ 1 ]), sizeof(WAVEHDR) );
+				
+				// If we can use WaveOut, don't use SDL_audio.
+				if( ! error )
+					sdl_audio = false;
+			}
+		}
+#endif
+		if( sdl_audio )
+			SDL_OpenAudio( &want, &(userdata.Spec) );
+	}
 	
 	if( write )
 	{
@@ -1089,9 +1176,11 @@ int main( int argc, char **argv )
 		fflush( userdata.WriteTo );
 	}
 	
-	// Keep track of visualizer's progress.
+	// Visualizer variables.
 	size_t visualizer_start_sample = 0;
+	int visualizer_last_sent = 0;
 	size_t visualizer_loading_frame = 0;
+	int visualizer_color1 = 0, visualizer_color2 = 1;
 	
 	// Keep running until playback is complete.
 	bool running = (userdata.Queue.size() || userdata.Songs.size());
@@ -1115,15 +1204,23 @@ int main( int argc, char **argv )
 				if( event.type == SDL_QUIT )
 				{
 					running = false;
-					SDL_PauseAudio( 1 );
+					if( sdl_audio )
+						SDL_PauseAudio( 1 );
 				}
 				else if( event.type == SDL_KEYDOWN )
 				{
 					Uint8 key = event.key.keysym.sym;
-					if( key == SDLK_SPACE )
+					if( key == SDLK_q )
+					{
+						running = false;
+						if( sdl_audio )
+							SDL_PauseAudio( 1 );
+					}
+					else if( key == SDLK_SPACE )
 					{
 						userdata.Playing = ! userdata.Playing;
-						SDL_PauseAudio( userdata.Playing ? 0 : 1 );
+						if( sdl_audio )
+							SDL_PauseAudio( userdata.Playing ? 0 : 1 );
 					}
 					else if( key == SDLK_m )
 						userdata.Metronome = ! userdata.Metronome;
@@ -1242,10 +1339,13 @@ int main( int argc, char **argv )
 							SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
 						}
 					}
-					else if( key == SDLK_q )
+					else if( key == SDLK_c )
 					{
-						running = false;
-						SDL_PauseAudio( 1 );
+						int visualizer_colors = visualizer_color1 * 3 + visualizer_color2;
+						visualizer_colors ++;
+						visualizer_colors %= 9;
+						visualizer_color1 = visualizer_colors / 3;
+						visualizer_color2 = visualizer_colors % 3;
 					}
 				}
 			}
@@ -1259,8 +1359,10 @@ int main( int argc, char **argv )
 			// Visualize the waveform in the window.
 			if( visualizer && screen && (userdata.Playing || userdata.Songs.empty()) )
 			{
-				Uint32 white = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
-				Uint32 yellow = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 );
+				Uint32 colors[ 3 ];
+				colors[ 0 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+				colors[ 1 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 );
+				colors[ 2 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 );
 				Uint32* pixels = (Uint32*) screen->pixels;
 				SDL_LockSurface( screen );
 				for( int x = 0; x < screen->w; x ++ )
@@ -1270,11 +1372,18 @@ int main( int argc, char **argv )
 					{
 						Uint8 r = 0x00, g = 0x00, b = 0x00;
 						SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f ), std::min<int>( 0xFF, b * 0.9375f ) );
+						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
 					}
 					
 					if( userdata.Playing )
 					{
+						// Keep the visualizer synchronized with the audio playback.
+						if( userdata.Buffer.LastSent != visualizer_last_sent )
+						{
+							visualizer_last_sent = userdata.Buffer.LastSent;
+							visualizer_start_sample = (visualizer_last_sent - userdata.Spec.samples + userdata.Buffer.BufferSize) % userdata.Buffer.BufferSize;
+						}
+						
 						// Fill in the waveform.
 						for( int c = userdata.Spec.channels - 1; c >= 0; c -- )
 						{
@@ -1284,7 +1393,7 @@ int main( int argc, char **argv )
 							if( (volume > 0.f) && (volume < 1.f) )
 								amplitude /= volume;
 							int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
-							pixels[ y * screen->w + x ] = (c % 2) ? yellow : white;
+							pixels[ y * screen->w + x ] = (c % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 						}
 					}
 					else
@@ -1292,8 +1401,8 @@ int main( int argc, char **argv )
 						// Loading animation.
 						int y1 = ((screen->h - x) % screen->h + screen->h + visualizer_loading_frame) % screen->h;
 						int y2 = (y1 + screen->h / 2) % screen->h;
-						pixels[ y1 * screen->w + x ] = white;
-						pixels[ y2 * screen->w + x ] = yellow;
+						pixels[ y1 * screen->w + x ] = colors[ visualizer_color1 ];
+						pixels[ y2 * screen->w + x ] = colors[ visualizer_color2 ];
 					}
 				}
 				SDL_UnlockSurface( screen );
@@ -1325,6 +1434,10 @@ int main( int argc, char **argv )
 			Uint8 buffer[ 1024 ];
 			want.callback( (void*) &userdata, buffer, 1024 );
 		}
+#ifdef WAVEOUT
+		else if( ! sdl_audio )
+			WaveOutCheck( &userdata );
+#endif
 		
 		running = running && (userdata.Queue.size() || userdata.Songs.size() || userdata.Buffer.Buffered);
 	}
@@ -1367,10 +1480,12 @@ int main( int argc, char **argv )
 	}
 	
 	// Quit SDL.
-	printf( "Closing SDL...\n" );
-	SDL_LockAudio();
-	SDL_CloseAudio();
-	SDL_UnlockAudio();
+	if( sdl_audio )
+	{
+		SDL_LockAudio();
+		SDL_CloseAudio();
+		SDL_UnlockAudio();
+	}
 	SDL_Quit();
 	
 	printf( "Done quitting.\n" );

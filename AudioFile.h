@@ -35,6 +35,6 @@ private:
 	int got_frame;
 	AVAudioResampleContext *avr;
 	
-	bool decode_packet( void );
-	bool open_codec_context( int *stream_idx, AVFormatContext *fmt_ctx, enum AVMediaType type );
+	bool DecodePacket( void );
+	bool OpenAudioCodecContext( void );
 };

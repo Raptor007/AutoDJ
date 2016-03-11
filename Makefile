@@ -27,10 +27,10 @@ endif
 
 ifneq (,$(findstring MINGW,$(UNAME))$(findstring CYGWIN,$(UNAME)))
 PREFIX = /mingw
-CFLAGS += -mwindows -static-libgcc -static-libstdc++
+CFLAGS += -DWAVEOUT -Wno-unused-parameter -mwindows -static-libgcc -static-libstdc++
 LIBDIR = $(PREFIX)/lib
 LIB = libiconv.a
-LIBRARIES := -lmingw32 -lSDLmain -lSDL -lavdevice -lavformat -lavfilter -lavcodec -lavresample -lswscale -lavutil -lswresample $(LIBRARIES) -lws2_32 -lsecur32
+LIBRARIES := -lmingw32 -lSDLmain -lSDL -lavdevice -lavformat -lavfilter -lavcodec -lavresample -lswscale -lavutil -lswresample $(LIBRARIES) -lws2_32 -lsecur32 -lwinmm
 TARGET = AutoDJ.exe
 INSTALL_DIR = /usr/bin
 endif

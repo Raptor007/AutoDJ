@@ -6,6 +6,7 @@ PlaybackBuffer::PlaybackBuffer( void )
 	BufferSize = 0;
 	Buffered = 0;
 	StartAt = 0;
+	LastSent = 0;
 	Buffer = NULL;
 }
 
@@ -51,6 +52,8 @@ void PlaybackBuffer::FillStream( void *userdata, Uint8 *stream, int len, bool lo
 	}
 	else
 	{
+		LastSent = StartAt;
+		
 		if( StartAt + len > BufferSize )
 		{
 			int chunk1 = BufferSize - StartAt;

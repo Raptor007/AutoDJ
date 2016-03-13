@@ -341,7 +341,7 @@ public:
 		Beats.clear();
 		for( size_t attempt = 0; (attempt < 4) && (Beats.size() < 20); attempt ++ )
 		{
-			double min_value = highest * (attempt + 1.) / 8.;
+			double min_value = highest / (8. * (attempt + 1.));
 			double min_inc_factor = 128. / (attempt + 1.);
 			Beats.clear();
 			prev = 0.;

@@ -71,7 +71,8 @@ public:
 	double CurrentFrame, MaxFrame, FirstBeatFrame, FirstOutroFrame;
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
-
+	double VolumeMax, VolumeAverage;
+	
 	Song( std::string filename )
 	{
 		BPM = 140.;
@@ -81,6 +82,8 @@ public:
 		FirstOutroFrame = 0.;
 		IntroBeats = 96;
 		OutroBeats = 128;
+		VolumeMax = 1.;
+		VolumeAverage = 0.25;
 		
 		if( Audio.Load( filename.c_str() ) )
 		{
@@ -238,6 +241,16 @@ public:
 		return (CurrentFrame >= MaxFrame);
 	}
 	
+	double VolumeAdjustment( void ) const
+	{
+		return 0.25 / VolumeAverage;
+	}
+	
+	double VolumeAdjustmentToMax( void ) const
+	{
+		return 1. / VolumeMax;
+	}
+	
 	void Analyze( void )
 	{
 		if( !( Audio.Data && Audio.Size ) )
@@ -258,31 +271,31 @@ public:
 		double highest = 0.;
 		
 		// Parameters for low-pass filter.
-		size_t samples = 1800;
-		if( samples > max_analysis_frame )
-			samples = max_analysis_frame;
+		size_t lpf_samples = Audio.SampleRate * 2 / 49;  // 44100 -> 1800
+		if( lpf_samples > max_analysis_frame )
+			lpf_samples = max_analysis_frame;
 		double prev_sample_power = 1.0;
 		
 		// Get starting block sum for the low-pass filter.
-		for( size_t frame = 0; frame < samples; frame ++ )
+		for( size_t frame = 0; frame < lpf_samples; frame ++ )
 			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
-				prev += buffer16[ frame * Audio.Channels + channel ] * pow( prev_sample_power, samples - frame - 1. ) / (double) Audio.Channels;
+				prev += buffer16[ frame * Audio.Channels + channel ] * pow( prev_sample_power, lpf_samples - frame - 1. ) / (double) Audio.Channels;
 		
 		// Process the rest of the audio.
-		for( size_t frame = samples; frame < max_analysis_frame; frame ++ )
+		for( size_t frame = lpf_samples; frame < max_analysis_frame; frame ++ )
 		{
 			// Subtract the oldest sample of the block and add the new one.
 			double point = prev * prev_sample_power;
 			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
 			{
-				point -= buffer16[ (frame - samples) * Audio.Channels + channel ] * pow( prev_sample_power, samples ) / (double) Audio.Channels;
+				point -= buffer16[ (frame - lpf_samples) * Audio.Channels + channel ] * pow( prev_sample_power, lpf_samples ) / (double) Audio.Channels;
 				point += buffer16[ frame * Audio.Channels + channel ] / (double) Audio.Channels;
 			}
 			
 			if( fabs(point) < prev_abs )
 			{
 				// Found a peak on the previous frame.
-				size_t peak_frame = frame - (samples / 2) - 1;
+				size_t peak_frame = frame - (lpf_samples / 2) - 1;
 				
 				if( avg_peak.size() )
 				{
@@ -325,29 +338,34 @@ public:
 		
 		// Look for significant increases in peak averages (bass hits).
 		
-		double min_value = highest / 8., min_inc_factor = 128.;
-		prev = 0.;
 		Beats.clear();
-		bool prev_adjacent = false;
-		
-		for( std::map<size_t,double>::iterator avg_iter = avg_peak.begin(); avg_iter != avg_peak.end(); avg_iter ++ )
+		for( size_t attempt = 0; (attempt < 4) && (Beats.size() < 20); attempt ++ )
 		{
-			if( prev_adjacent && (avg_iter->second > prev) )
+			double min_value = highest * (attempt + 1.) / 8.;
+			double min_inc_factor = 128. / (attempt + 1.);
+			Beats.clear();
+			prev = 0.;
+			bool prev_adjacent = false;
+			
+			for( std::map<size_t,double>::const_iterator avg_iter = avg_peak.begin(); avg_iter != avg_peak.end(); avg_iter ++ )
 			{
-				std::map<size_t,double>::iterator last = Beats.end();
-				last --;
-				Beats.erase( last );
-				Beats[ avg_iter->first ] = avg_iter->second;
+				if( prev_adjacent && (avg_iter->second > prev) )
+				{
+					std::map<size_t,double>::iterator last = Beats.end();
+					last --;
+					Beats.erase( last );
+					Beats[ avg_iter->first ] = avg_iter->second;
+				}
+				else if( (avg_iter->second >= min_value) && (avg_iter->second > prev * min_inc_factor) )
+				{
+					Beats[ avg_iter->first ] = avg_iter->second;
+					prev_adjacent = true;
+				}
+				else
+					prev_adjacent = false;
+				
+				prev = avg_iter->second;
 			}
-			else if( (avg_iter->second >= min_value) && (avg_iter->second > prev * min_inc_factor) )
-			{
-				Beats[ avg_iter->first ] = avg_iter->second;
-				prev_adjacent = true;
-			}
-			else
-				prev_adjacent = false;
-		
-			prev = avg_iter->second;
 		}
 		
 		size_t first_beat = avg_peak.begin()->first;
@@ -368,7 +386,7 @@ public:
 			size_t first_beat_matched = 0;
 			
 			// Try a few different starting points.
-			for( std::map<size_t,double>::iterator beat_iter = Beats.begin(); (beat_iter != Beats.end()) && (beat_iter->first < max_analysis_frame / 2); beat_iter ++ )
+			for( std::map<size_t,double>::const_iterator beat_iter = Beats.begin(); (beat_iter != Beats.end()) && (beat_iter->first < max_analysis_frame / 2); beat_iter ++ )
 			{
 				size_t start = beat_iter->first;
 				std::vector<int> doff_behind, doff_ahead;
@@ -378,7 +396,7 @@ public:
 				// Look at each place we expect the beat to hit.
 				for( size_t frame = start; frame < max_analysis_frame; frame += frame_skip )
 				{
-					std::map<size_t,double>::iterator exact_beat_found = Beats.find( frame );
+					std::map<size_t,double>::const_iterator exact_beat_found = Beats.find( frame );
 					if( exact_beat_found != Beats.end() )
 					{
 						// We found an exact match.
@@ -449,12 +467,12 @@ public:
 				
 				if( doff_behind.size() >= 2 )
 				{
-					for( std::vector<int>::iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
+					for( std::vector<int>::const_iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
 						mean_behind += *doff_iter / (double) doff_behind.size();
 					
 					error_behind = 0.;
 					
-					for( std::vector<int>::iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
+					for( std::vector<int>::const_iterator doff_iter = doff_behind.begin(); doff_iter != doff_behind.end(); doff_iter ++ )
 					{
 						double ddoff = (*doff_iter - mean_behind);
 						error_behind += (ddoff * ddoff) / (double) doff_behind.size();
@@ -466,12 +484,12 @@ public:
 				
 				if( doff_ahead.size() >= 2 )
 				{
-					for( std::vector<int>::iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
+					for( std::vector<int>::const_iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
 						mean_ahead += *doff_iter / (double) doff_ahead.size();
 					
 					error_ahead = 0.;
 					
-					for( std::vector<int>::iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
+					for( std::vector<int>::const_iterator doff_iter = doff_ahead.begin(); doff_iter != doff_ahead.end(); doff_iter ++ )
 					{
 						double ddoff = (*doff_iter - mean_ahead);
 						error_ahead += (ddoff * ddoff) / (double) doff_ahead.size();
@@ -511,6 +529,33 @@ public:
 		else if( bpm_fpart > bpm_rounding )
 			BPM += bpm_fpart;
 		FirstBeatFrame = best_first_beat;
+		
+		// Determine song volume.
+		VolumeMax = 0.;
+		for( size_t frame = 0; frame < max_analysis_frame; frame ++ )
+		{
+			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
+			{
+				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
+				if( this_amp > VolumeMax )
+					VolumeMax = this_amp;
+			}
+		}
+		VolumeAverage = 0.;
+		size_t samples_in_average = 0;
+		for( size_t frame = 0; frame < max_analysis_frame; frame ++ )
+		{
+			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
+			{
+				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
+				if( this_amp > VolumeMax / 8. )
+				{
+					VolumeAverage += this_amp;
+					samples_in_average ++;
+				}
+			}
+		}
+		VolumeAverage /= samples_in_average;
 	}
 };
 
@@ -551,6 +596,8 @@ public:
 	double SourcePitchScale;
 	uint8_t Resample;
 	double Volume;
+	bool VolumeMatching;
+	bool PreventClipping;
 	bool Repeat;
 	bool Metronome;
 	PlaybackBuffer Buffer;
@@ -569,6 +616,8 @@ public:
 		SourcePitchScale = 1.;
 		Resample = ResampleMethod::Auto;
 		Volume = 1.;
+		VolumeMatching = true;
+		PreventClipping = false;
 		Repeat = true;
 		Metronome = false;
 		Buffer.SetSize( 131072 );
@@ -600,7 +649,8 @@ public:
 				// Make sure the song loaded okay.
 				if( thread_iter->second->LoadingSong )
 				{
-					printf( "%s: %.2f BPM, Start %.4f sec, Beats %.1f\n", thread_iter->second->Filename.c_str(), thread_iter->second->LoadingSong->BPM, thread_iter->second->LoadingSong->FirstBeatFrame / thread_iter->second->LoadingSong->Audio.SampleRate, thread_iter->second->LoadingSong->TotalBeats() );
+					Song *song = thread_iter->second->LoadingSong;
+					printf( "%s: %.2f BPM, Start %.4f sec, Beats %.1f Found %i, Volume Avg %.2f Max %.2f\n", thread_iter->second->Filename.c_str(), song->BPM, song->FirstBeatFrame / song->Audio.SampleRate, song->TotalBeats(), (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
 					fflush( stdout );
 					
 					if( thread_iter->second->UD->Repeat )
@@ -610,10 +660,10 @@ public:
 					
 					// Only the first song should play pre-beat lead-in.
 					if( ! first_song )
-						thread_iter->second->LoadingSong->CurrentFrame = thread_iter->second->LoadingSong->FirstBeatFrame;
+						song->CurrentFrame = song->FirstBeatFrame;
 					
 					// Done loading and analyzing, so put it in the playback queue.
-					thread_iter->second->UD->Songs.push_back( thread_iter->second->LoadingSong );
+					thread_iter->second->UD->Songs.push_back( song );
 					
 					// Start playback after we load the first one successfully.
 					if( first_song )
@@ -762,6 +812,15 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		
 		double bpm = ud->SourceBPM ? (current_song->BPM * ud->SourcePitchScale) : ud->BPM;
 		
+		double volume = ud->VolumeMatching ? ud->Volume * current_song->VolumeAdjustment() : ud->Volume;
+		double volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
+		if( ud->PreventClipping )
+		{
+			volume = std::min<double>( current_song->VolumeAdjustmentToMax(), volume );
+			if( next_song )
+				volume_next = std::min<double>( next_song->VolumeAdjustmentToMax(), volume_next );
+		}
+		
 		for( int i = 0; i < len / 2; i += ud->Spec.channels )
 		{
 			// Check for crossfade into second song.
@@ -793,12 +852,12 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				if( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) )
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->NearestFrame( channel ) * ud->Volume );
+						stream16[ i + channel ] = Finalize( current_song->NearestFrame( channel ) * volume );
 				}
 				else
 				{
 					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->CubicFrame( channel ) * ud->Volume );
+						stream16[ i + channel ] = Finalize( current_song->CubicFrame( channel ) * volume );
 				}
 				
 				current_song->Advance( bpm, ud->Spec.freq );
@@ -815,9 +874,9 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 				{
-					double a = a_nearest ? current_song->NearestFrame( channel ) : current_song->CubicFrame( channel );
-					double b = b_nearest ? next_song->NearestFrame( channel ) : next_song->CubicFrame( channel );
-					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) * ud->Volume );
+					double a = (a_nearest ? current_song->NearestFrame( channel ) : current_song->CubicFrame( channel )) * volume;
+					double b = (b_nearest ? next_song->NearestFrame( channel ) : next_song->CubicFrame( channel )) * volume_next;
+					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) );
 				}
 				
 				current_song->Advance( bpm, ud->Spec.freq );
@@ -954,17 +1013,17 @@ std::deque<std::string> DirSongs( std::string path )
 HWAVEOUT WaveOutHandle = NULL;
 WAVEHDR WaveOutHeaders[ 2 ];
 Uint8 *WaveOutBuffers[ 2 ] = { NULL, NULL };
-int WaveOutBufferSize = 4096;
+int WaveOutBufferSize = 0;
 int WaveOutBufferNum = 0;
-int WaveOutBuffersNeeded = 2;
+int WaveOutBuffersNeeded = 0;
 
-static void CALLBACK WaveOutCallback( HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2 )
+void CALLBACK WaveOutCallback( HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2 )
 {
 	if( uMsg == WOM_DONE )
 		WaveOutBuffersNeeded = std::min<int>( 2, WaveOutBuffersNeeded + 1 );
 }
 
-static void WaveOutCheck( UserData *ud )
+void WaveOutCheck( UserData *ud )
 {
 	while( WaveOutBuffersNeeded > 0 )
 	{
@@ -1011,6 +1070,10 @@ int main( int argc, char **argv )
 	bool visualizer = true;
 	bool playback = true;
 	bool sdl_audio = true;
+#ifdef WAVEOUT
+	// Default to WaveOut.
+	sdl_audio = false;
+#endif
 	const char *write = NULL;
 	SDL_AudioSpec want;
 	memset( &want, 0, sizeof(want) );
@@ -1028,6 +1091,10 @@ int main( int argc, char **argv )
 		{
 			if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
 				window = false;
+#ifdef WAVEOUT
+			else if( strcasecmp( argv[ i ], "--sdl-audio" ) == 0 )
+				sdl_audio = true;
+#endif
 			else if( strcasecmp( argv[ i ], "--fullscreen" ) == 0 )
 			{
 				window = true;
@@ -1056,6 +1123,10 @@ int main( int argc, char **argv )
 			}
 			else if( strncasecmp( argv[ i ], "--volume=", strlen("--volume=") ) == 0 )
 				userdata.Volume = atof( argv[ i ] + strlen("--volume=") );
+			else if( strcasecmp( argv[ i ], "--no-volume-matching" ) == 0 )
+				userdata.VolumeMatching = false;
+			else if( strcasecmp( argv[ i ], "--prevent-clipping" ) == 0 )
+				userdata.PreventClipping = true;
 			else if( strncasecmp( argv[ i ], "--rate=", strlen("--rate=") ) == 0 )
 				want.freq = atoi( argv[ i ] + strlen("--rate=") );
 			else if( strncasecmp( argv[ i ], "--channels=", strlen("--channels=") ) == 0 )
@@ -1125,41 +1196,50 @@ int main( int argc, char **argv )
 	if( playback )
 	{
 #ifdef WAVEOUT
-		int wave_out_devices = waveOutGetNumDevs();
-		if( wave_out_devices )
+		if( ! sdl_audio )
 		{
-			// Start WaveOut.
-			WAVEFORMATEX wfx;
-			memset( &wfx, 0, sizeof(WAVEFORMATEX) );
-			wfx.wFormatTag = WAVE_FORMAT_PCM;
-			wfx.wBitsPerSample = 16;
-			wfx.nChannels = want.channels;
-			wfx.nSamplesPerSec = want.freq;
-			wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
-			wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
-			wfx.cbSize = 0;
-			MMRESULT wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
-			if( wave_out_result == MMSYSERR_NOERROR )
+			// We will fall back to SDL_audio unless WaveOut succeeds.
+			sdl_audio = true;
+			
+			int wave_out_devices = waveOutGetNumDevs();
+			if( wave_out_devices )
 			{
-				// Allocate 2 output buffers.
-				WaveOutBufferSize = want.samples * wfx.nChannels * wfx.wBitsPerSample / 8;
-				WaveOutBuffers[ 0 ] = (Uint8*) malloc( WaveOutBufferSize );
-				WaveOutBuffers[ 1 ] = (Uint8*) malloc( WaveOutBufferSize );
-				memset( WaveOutBuffers[ 0 ], 0, WaveOutBufferSize );
-				memset( WaveOutBuffers[ 1 ], 0, WaveOutBufferSize );
-				memset( &(WaveOutHeaders[ 0 ]), 0, sizeof(WAVEHDR) );
-				memset( &(WaveOutHeaders[ 1 ]), 0, sizeof(WAVEHDR) );
-				WaveOutHeaders[ 0 ].lpData = (HPSTR) WaveOutBuffers[ 0 ];
-				WaveOutHeaders[ 1 ].lpData = (HPSTR) WaveOutBuffers[ 1 ];
-				WaveOutHeaders[ 0 ].dwBufferLength = WaveOutBufferSize;
-				WaveOutHeaders[ 1 ].dwBufferLength = WaveOutBufferSize;
-				int error = waveOutPrepareHeader( WaveOutHandle, &(WaveOutHeaders[ 0 ]), sizeof(WAVEHDR) );
-				if( ! error )
-					error = waveOutPrepareHeader( WaveOutHandle, &(WaveOutHeaders[ 1 ]), sizeof(WAVEHDR) );
-				
-				// If we can use WaveOut, don't use SDL_audio.
-				if( ! error )
-					sdl_audio = false;
+				// Start WaveOut.
+				WAVEFORMATEX wfx;
+				memset( &wfx, 0, sizeof(WAVEFORMATEX) );
+				wfx.wFormatTag = WAVE_FORMAT_PCM;
+				wfx.wBitsPerSample = 16;
+				wfx.nChannels = want.channels;
+				wfx.nSamplesPerSec = want.freq;
+				wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
+				wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
+				wfx.cbSize = 0;
+				MMRESULT wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+				if( wave_out_result == MMSYSERR_NOERROR )
+				{
+					// Allocate 2 output buffers.
+					WaveOutBufferSize = want.samples * wfx.nChannels * wfx.wBitsPerSample / 8;
+					WaveOutBuffers[ 0 ] = (Uint8*) malloc( WaveOutBufferSize );
+					WaveOutBuffers[ 1 ] = (Uint8*) malloc( WaveOutBufferSize );
+					memset( WaveOutBuffers[ 0 ], 0, WaveOutBufferSize );
+					memset( WaveOutBuffers[ 1 ], 0, WaveOutBufferSize );
+					memset( &(WaveOutHeaders[ 0 ]), 0, sizeof(WAVEHDR) );
+					memset( &(WaveOutHeaders[ 1 ]), 0, sizeof(WAVEHDR) );
+					WaveOutHeaders[ 0 ].lpData = (HPSTR) WaveOutBuffers[ 0 ];
+					WaveOutHeaders[ 1 ].lpData = (HPSTR) WaveOutBuffers[ 1 ];
+					WaveOutHeaders[ 0 ].dwBufferLength = WaveOutBufferSize;
+					WaveOutHeaders[ 1 ].dwBufferLength = WaveOutBufferSize;
+					int error = waveOutPrepareHeader( WaveOutHandle, &(WaveOutHeaders[ 0 ]), sizeof(WAVEHDR) );
+					if( ! error )
+						error = waveOutPrepareHeader( WaveOutHandle, &(WaveOutHeaders[ 1 ]), sizeof(WAVEHDR) );
+					
+					if( ! error )
+					{
+						// WaveOut is ready to go with 2 output buffers, so don't use SDL_audio.
+						WaveOutBuffersNeeded = 2;
+						sdl_audio = false;
+					}
+				}
 			}
 		}
 #endif
@@ -1209,7 +1289,7 @@ int main( int argc, char **argv )
 				}
 				else if( event.type == SDL_KEYDOWN )
 				{
-					Uint8 key = event.key.keysym.sym;
+					SDLKey key = event.key.keysym.sym;
 					if( key == SDLK_q )
 					{
 						running = false;
@@ -1222,16 +1302,38 @@ int main( int argc, char **argv )
 						if( sdl_audio )
 							SDL_PauseAudio( userdata.Playing ? 0 : 1 );
 					}
-					else if( key == SDLK_m )
-						userdata.Metronome = ! userdata.Metronome;
-					else if( key == SDLK_LEFTBRACKET )
+					else if( key == SDLK_MINUS )
+					{
+						userdata.Volume -= 0.0625;
+						printf( "Volume: %.3f\n", userdata.Volume );
+						fflush( stdout );
+					}
+					else if( key == SDLK_EQUALS )
+					{
+						userdata.Volume += 0.0625;
+						printf( "Volume: %.3f\n", userdata.Volume );
+						fflush( stdout );
+					}
+					else if( key == SDLK_BACKSPACE )
+					{
+						userdata.VolumeMatching = ! userdata.VolumeMatching;
+						printf( "Volume Matching: %s\n", userdata.VolumeMatching ? "On" : "Off" );
+						fflush( stdout );
+					}
+					else if( key == SDLK_p )
+					{
+						userdata.PreventClipping = ! userdata.PreventClipping;
+						printf( "Prevent Clipping: %s\n", userdata.PreventClipping ? "On" : "Off" );
+						fflush( stdout );
+					}
+					else if( key == SDLK_LEFTBRACKET || key == SDLK_LEFT )
 					{
 						Song *current_song = userdata.Songs.front();
 						current_song->CurrentFrame = 0.;
 						current_song->FirstOutroFrame = 0.;
-						current_song->OutroBeats = 0;
+						current_song->OutroBeats = 128;
 					}
-					else if( key == SDLK_RIGHTBRACKET )
+					else if( key == SDLK_RIGHTBRACKET || key == SDLK_RIGHT )
 					{
 						Song *current_song = userdata.Songs.front();
 						int beat = current_song->Beat();
@@ -1247,17 +1349,7 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_BACKSLASH )
 						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->MaxFrame;
-					else if( key == SDLK_SEMICOLON )
-					{
-						int beat = userdata.Songs.front()->Beat();
-						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) - 32 );
-					}
-					else if( key == SDLK_QUOTE )
-					{
-						int beat = userdata.Songs.front()->Beat();
-						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) + 32 );
-					}
-					else if( key == SDLK_COMMA )
+					else if( key == SDLK_k )
 					{
 						if( userdata.SourceBPM && userdata.Songs.size() )
 							userdata.BPM = (int)( userdata.Songs.front()->BPM + 0.5 );
@@ -1265,8 +1357,9 @@ int main( int argc, char **argv )
 						userdata.BPM -= 1.;
 						userdata.SourceBPM = false;
 						printf( "Playback BPM: %.2f\n", userdata.BPM );
+						fflush( stdout );
 					}
-					else if( key == SDLK_PERIOD )
+					else if( key == SDLK_l )
 					{
 						if( userdata.SourceBPM && userdata.Songs.size() )
 							userdata.BPM = (int)( userdata.Songs.front()->BPM + 0.5 );
@@ -1274,52 +1367,40 @@ int main( int argc, char **argv )
 						userdata.BPM += 1.;
 						userdata.SourceBPM = false;
 						printf( "Playback BPM: %.2f\n", userdata.BPM );
+						fflush( stdout );
+					}
+					else if( key == SDLK_SEMICOLON || key == SDLK_DOWN )
+					{
+						userdata.SourceBPM = true;
+						userdata.SourcePitchScale /= pow( 2., 1./12. );
+						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
+						fflush( stdout );
+					}
+					else if( key == SDLK_QUOTE || key == SDLK_UP )
+					{
+						userdata.SourceBPM = true;
+						userdata.SourcePitchScale *= pow( 2., 1./12. );
+						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
+						fflush( stdout );
+					}
+					else if( key == SDLK_m )
+						userdata.Metronome = ! userdata.Metronome;
+					else if( key == SDLK_COMMA )
+					{
+						int beat = userdata.Songs.front()->Beat();
+						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) - 32 );
+					}
+					else if( key == SDLK_PERIOD )
+					{
+						int beat = userdata.Songs.front()->Beat();
+						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) + 32 );
 					}
 					else if( key == SDLK_SLASH )
 					{
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale = 1.;
-						printf( "Playback BPM: Match Source\n" );
-					}
-					else if( key == SDLK_k )
-					{
-						userdata.SourceBPM = true;
-						userdata.SourcePitchScale /= pow( 2., 1./12. );
-						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
-					}
-					else if( key == SDLK_l )
-					{
-						userdata.SourceBPM = true;
-						userdata.SourcePitchScale *= pow( 2., 1./12. );
-						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
-					}
-					else if( key == SDLK_MINUS )
-					{
-						userdata.Volume -= 0.0625;
-						printf( "Playback Volume: %.3f\n", userdata.Volume );
-					}
-					else if( key == SDLK_EQUALS )
-					{
-						userdata.Volume += 0.0625;
-						printf( "Playback Volume: %.3f\n", userdata.Volume );
-					}
-					else if( key == SDLK_a )
-					{
-						userdata.Resample = ResampleMethod::Auto;
-						printf( "Resample: Auto\n" );
-					}
-					else if( key == SDLK_s )
-					{
-						if( userdata.Resample == ResampleMethod::Nearest )
-						{
-							userdata.Resample = ResampleMethod::Cubic;
-							printf( "Resample: Cubic\n" );
-						}
-						else
-						{
-							userdata.Resample = ResampleMethod::Nearest;
-							printf( "Resample: Nearest\n" );
-						}
+						printf( "BPM/Pitch: Match Source\n" );
+						fflush( stdout );
 					}
 					else if( key == SDLK_v )
 					{

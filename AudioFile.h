@@ -8,6 +8,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavresample/avresample.h>
 }
+#include "Mutex.h"
 
 class AudioFile
 {
@@ -16,12 +17,14 @@ public:
 	size_t Allocated, Size;
 	size_t Channels, SampleRate, BytesPerSample;
 	
-	AudioFile( const char *filename = NULL );
+	static Mutex GlobalLock;
+	
+	AudioFile( const char *filename = NULL, bool lock = false );
 	~AudioFile();
 	
 	void Clear( void );
 	bool AddData( uint8_t *add_data, size_t add_size );
-	bool Load( const char *filename );
+	bool Load( const char *filename, bool lock = false );
 
 private:
 	AVFormatContext *fmt_ctx;

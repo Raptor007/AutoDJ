@@ -10,6 +10,7 @@
 #include <deque>
 #include <vector>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <string>
 #include <SDL/SDL.h>
@@ -67,17 +68,18 @@ class Song
 {
 public:
 	AudioFile Audio;
+	size_t TotalFrames;
 	double BPM;
-	double CurrentFrame, MaxFrame, FirstBeatFrame, FirstOutroFrame;
+	double CurrentFrame, FirstBeatFrame, FirstOutroFrame;
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
 	double VolumeMax, VolumeAverage;
 	
 	Song( std::string filename )
 	{
-		BPM = 140.;
+		TotalFrames = 0;
+		BPM = 138.;
 		CurrentFrame = 0.;
-		MaxFrame = 0.;
 		FirstBeatFrame = 0.;
 		FirstOutroFrame = 0.;
 		IntroBeats = 96;
@@ -87,17 +89,25 @@ public:
 		
 		if( Audio.Load( filename.c_str() ) )
 		{
-			MaxFrame = Audio.Size / (Audio.BytesPerSample * Audio.Channels);
+			TotalFrames = Audio.Size / (Audio.BytesPerSample * Audio.Channels);
 			
-			if( (MaxFrame < 0.5) || (MaxFrame / (double) Audio.SampleRate < 30.) )
+			if( TotalFrames / (double) Audio.SampleRate < 30. )
+			{
 				Audio.Clear();
+				TotalFrames = 0;
+			}
 		}
 		else
-			MaxFrame = 0.;
+			TotalFrames = 0;
 	}
 	
 	~Song()
 	{
+	}
+	
+	double TotalSeconds( void ) const
+	{
+		return TotalFrames / (double) Audio.SampleRate;
 	}
 	
 	void SetFirstBeat( int minutes, double seconds )
@@ -167,7 +177,7 @@ public:
 	
 	double TotalBeats( void ) const
 	{
-		return BeatAtFrame( MaxFrame );
+		return BeatAtFrame( TotalFrames );
 	}
 	
 	double FirstOutroBeat( void ) const
@@ -238,7 +248,7 @@ public:
 	
 	bool Finished( void ) const
 	{
-		return (CurrentFrame >= MaxFrame);
+		return (CurrentFrame >= TotalFrames);
 	}
 	
 	double VolumeAdjustment( void ) const
@@ -251,114 +261,160 @@ public:
 		return 1. / VolumeMax;
 	}
 	
-	void Analyze( void )
+	void Analyze( size_t first_frame = 0 )
 	{
 		if( !( Audio.Data && Audio.Size ) )
 			return;
 		
-		// Apply low-pass filter and keep track of average peak height over a period of samples.
-		
 		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
 		
-		// Don't analyze more than 10 minutes of audio per track.
-		size_t max_analysis_frame = Audio.SampleRate * 60 * 10;
-		if( max_analysis_frame > MaxFrame )
-			max_analysis_frame = MaxFrame;
+		// Don't analyze more than 10 minutes of audio per song.
+		size_t max_analysis_frame = std::min<size_t>( Audio.SampleRate * 60 * 10 + first_frame, TotalFrames );
 		
-		double prev = 0., prev_abs = 0.;
-		std::map<size_t,double> avg_peak;
-		int num_peaks = 1;
-		double highest = 0.;
+		if( first_frame >= max_analysis_frame )
+			return;
 		
-		// Parameters for low-pass filter.
-		size_t lpf_samples = Audio.SampleRate * 2 / 49;  // 44100 -> 1800
-		if( lpf_samples > max_analysis_frame )
-			lpf_samples = max_analysis_frame;
-		double prev_sample_power = 1.0;
-		
-		// Get starting block sum for the low-pass filter.
-		for( size_t frame = 0; frame < lpf_samples; frame ++ )
-			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
-				prev += buffer16[ frame * Audio.Channels + channel ] * pow( prev_sample_power, lpf_samples - frame - 1. ) / (double) Audio.Channels;
-		
-		// Process the rest of the audio.
-		for( size_t frame = lpf_samples; frame < max_analysis_frame; frame ++ )
+		// Determine song volume.
+		VolumeMax = 0.;
+		for( size_t frame = first_frame; frame < max_analysis_frame; frame ++ )
 		{
-			// Subtract the oldest sample of the block and add the new one.
-			double point = prev * prev_sample_power;
 			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
 			{
-				point -= buffer16[ (frame - lpf_samples) * Audio.Channels + channel ] * pow( prev_sample_power, lpf_samples ) / (double) Audio.Channels;
+				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
+				if( this_amp > VolumeMax )
+					VolumeMax = this_amp;
+			}
+		}
+		VolumeAverage = 0.;
+		size_t samples_in_average = 0;
+		for( size_t frame = first_frame; frame < max_analysis_frame; frame ++ )
+		{
+			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
+			{
+				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
+				if( this_amp > VolumeMax / 8. )
+				{
+					VolumeAverage += this_amp;
+					samples_in_average ++;
+				}
+			}
+		}
+		VolumeAverage /= samples_in_average;
+		
+		SDL_Delay( 1 );
+		
+		
+		// Apply low-pass filter and keep track of average peak height over a period of samples.
+		
+		size_t lpf_samples = std::min<size_t>( max_analysis_frame - first_frame, Audio.SampleRate * 2 / 49 ); // 44100 -> 1800
+		double prev = 0., prev_abs = 0., prev_prev_abs = 0.;
+		std::map<size_t,double> avg_peak;
+		int num_nearby_peaks = 1;
+		double highest = 0.;
+		
+		// Get starting block sum for the low-pass filter.
+		for( size_t frame = first_frame; frame < lpf_samples + first_frame; frame ++ )
+			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
+				prev += buffer16[ frame * Audio.Channels + channel ] / (double) Audio.Channels;
+		
+		SDL_Delay( 1 );
+		
+		// Process the rest of the audio.
+		for( size_t frame = lpf_samples + first_frame; frame < max_analysis_frame; frame ++ )
+		{
+			// Subtract the oldest sample of the block and add the new one.
+			double point = prev;
+			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
+			{
+				point -= buffer16[ (frame - lpf_samples) * Audio.Channels + channel ] / (double) Audio.Channels;
 				point += buffer16[ frame * Audio.Channels + channel ] / (double) Audio.Channels;
 			}
+			double point_abs = fabs(point);
 			
-			if( fabs(point) < prev_abs )
+			if( (prev_abs > point_abs) && (prev_abs > prev_prev_abs) )
 			{
 				// Found a peak on the previous frame.
 				size_t peak_frame = frame - (lpf_samples / 2) - 1;
 				
 				if( avg_peak.size() )
 				{
-					if( avg_peak.rbegin()->first + 900 < peak_frame )
+					size_t last_peak = avg_peak.rbegin()->first;
+					
+					if( last_peak + (lpf_samples / 2) < peak_frame )
 					{
-						avg_peak.rbegin()->second += prev_abs;
-						num_peaks ++;
+						// This peak is really close to one we already detected, so add them and keep count.
+						avg_peak[ last_peak ] += prev_abs;
+						num_nearby_peaks ++;
 					}
 					else
 					{
-						avg_peak.rbegin()->second /= num_peaks;
-						if( avg_peak.rbegin()->second > highest )
-							highest = avg_peak.rbegin()->second;
+						// If the previous peak had some adjacent, now we divide by the count.
+						avg_peak[ last_peak ] /= num_nearby_peaks;
+						if( avg_peak[ last_peak ] > highest )
+							highest = avg_peak[ last_peak ];
 						
+						// Start a new peak.
 						avg_peak[ peak_frame ] = prev_abs;
-						num_peaks = 1;
+						num_nearby_peaks = 1;
 					}
 				}
 				else
 				{
+					// This is the first peak.
 					avg_peak[ peak_frame ] = prev_abs;
-					num_peaks = 1;
+					num_nearby_peaks = 1;
 				}
-				
-				prev_abs = 0.;
 			}
-			else
-				prev_abs = fabs(point);
 			
+			prev_prev_abs = prev_abs;
+			prev_abs = point_abs;
 			prev = point;
 		}
 		
 		if( avg_peak.size() )
 		{
-			avg_peak.rbegin()->second /= num_peaks;
-			if( avg_peak.rbegin()->second > highest )
-				highest = avg_peak.rbegin()->second;
+			size_t last_peak = avg_peak.rbegin()->first;
+			
+			// If the last peak had some adjacent, now we divide by the count.
+			avg_peak[ last_peak ] /= num_nearby_peaks;
+			if( avg_peak[ last_peak ] > highest )
+				highest = avg_peak[ last_peak ];
 		}
+		
+		SDL_Delay( 1 );
 		
 		
 		// Look for significant increases in peak averages (bass hits).
 		
 		Beats.clear();
-		for( size_t attempt = 0; (attempt < 4) && (Beats.size() < 20); attempt ++ )
+		size_t want_beats = max_analysis_frame / Audio.SampleRate;
+		size_t prev_at = first_frame;
+		for( size_t attempt = 0; (attempt < 10) && (Beats.size() < want_beats); attempt ++ )
 		{
-			double min_value = highest / (8. * (attempt + 1.));
-			double min_inc_factor = 128. / (attempt + 1.);
+			double min_value = highest * pow( 3. / 4., ((int)(attempt / 2)) );
+			double min_inc_factor = pow( 2., 7 - ((attempt + 1) / 2) );
 			Beats.clear();
 			prev = 0.;
 			bool prev_adjacent = false;
 			
 			for( std::map<size_t,double>::const_iterator avg_iter = avg_peak.begin(); avg_iter != avg_peak.end(); avg_iter ++ )
 			{
-				if( prev_adjacent && (avg_iter->second > prev) )
+				bool is_near = (avg_iter->first - prev_at < lpf_samples);
+				
+				if( prev_adjacent && (avg_iter->second > prev) && is_near )
 				{
+					// The low-frequency peaks are still getting louder, and we want the crest.
 					std::map<size_t,double>::iterator last = Beats.end();
 					last --;
 					Beats.erase( last );
 					Beats[ avg_iter->first ] = avg_iter->second;
+					prev_at = avg_iter->first;
 				}
-				else if( (avg_iter->second >= min_value) && (avg_iter->second > prev * min_inc_factor) )
+				else if( (avg_iter->second >= min_value) && ((! is_near) || (avg_iter->second > prev * min_inc_factor)) )
 				{
+					// These low-frequency peaks are enough louder than the previous, so it's the start of a bass hit.
 					Beats[ avg_iter->first ] = avg_iter->second;
+					prev_at = avg_iter->first;
 					prev_adjacent = true;
 				}
 				else
@@ -366,14 +422,20 @@ public:
 				
 				prev = avg_iter->second;
 			}
+			
+			SDL_Delay( 1 );
+			
+			// No use trying again if we don't have any more low-frequency peaks detected.
+			if( Beats.size() >= avg_peak.size() )
+				break;
 		}
 		
-		size_t first_beat = avg_peak.begin()->first;
+		size_t first_beat = Beats.size() ? Beats.begin()->first : avg_peak.begin()->first;
 		
 		
 		// Search a range of likely BPMs and see how well the beats match.
 		
-		size_t best_frame_skip = Audio.SampleRate * 60 / 140;
+		double best_frame_skip = Audio.SampleRate * 60. / 138.;
 		size_t best_first_beat = first_beat;
 		double best_error = FLT_MAX;
 		int best_doff = INT_MAX;
@@ -382,7 +444,7 @@ public:
 		{
 			// Search at a BPM and see how closely it matches.
 			
-			size_t frame_skip = (Audio.SampleRate * 60. / (double) bpm) + 0.5;
+			double frame_skip = Audio.SampleRate * 60. / (double) bpm;
 			size_t first_beat_matched = 0;
 			
 			// Try a few different starting points.
@@ -394,8 +456,10 @@ public:
 				int misses_behind = 0, misses_ahead = 0;
 				
 				// Look at each place we expect the beat to hit.
-				for( size_t frame = start; frame < max_analysis_frame; frame += frame_skip )
+				for( double frame_float = start; frame_float + 0.5 < max_analysis_frame; frame_float += frame_skip )
 				{
+					size_t frame = frame_float + 0.5;
+					
 					std::map<size_t,double>::const_iterator exact_beat_found = Beats.find( frame );
 					if( exact_beat_found != Beats.end() )
 					{
@@ -519,6 +583,8 @@ public:
 					best_error = error_ahead;
 				}
 			}
+			
+			SDL_Delay( 1 );
 		}
 		
 		// If it's close, round to the nearest whole BPM.
@@ -528,34 +594,8 @@ public:
 			BPM += 1.;
 		else if( bpm_fpart > bpm_rounding )
 			BPM += bpm_fpart;
-		FirstBeatFrame = best_first_beat;
 		
-		// Determine song volume.
-		VolumeMax = 0.;
-		for( size_t frame = 0; frame < max_analysis_frame; frame ++ )
-		{
-			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
-			{
-				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
-				if( this_amp > VolumeMax )
-					VolumeMax = this_amp;
-			}
-		}
-		VolumeAverage = 0.;
-		size_t samples_in_average = 0;
-		for( size_t frame = 0; frame < max_analysis_frame; frame ++ )
-		{
-			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
-			{
-				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
-				if( this_amp > VolumeMax / 8. )
-				{
-					VolumeAverage += this_amp;
-					samples_in_average ++;
-				}
-			}
-		}
-		VolumeAverage /= samples_in_average;
+		FirstBeatFrame = best_first_beat;
 	}
 };
 
@@ -566,17 +606,19 @@ public:
 class SongLoadData
 {
 public:
-	bool Finished;
+	volatile bool Finished;
 	UserData *UD;
 	std::string Filename;
 	Song *LoadingSong;
+	SDL_Thread *Thread;
 	
 	SongLoadData( UserData *ud, std::string filename )
 	{
 		Finished = false;
 		UD = ud;
-		Filename = filename;
+		Filename = std::string( filename.c_str() );
 		LoadingSong = NULL;
+		Thread = SDL_CreateThread( &SongLoad, this );
 	}
 	
 	~SongLoadData(){}
@@ -605,7 +647,7 @@ public:
 	size_t WroteBytes;
 	std::deque<std::string> Queue;
 	std::deque<Song*> Songs;
-	std::map<SDL_Thread*,SongLoadData*> LoadThreads;
+	std::set<SongLoadData*> LoadingSongs;
 	
 	UserData( void )
 	{
@@ -625,56 +667,66 @@ public:
 		WroteBytes = 0;
 	}
 	
-	void LoadSong( std::string filename )
+	void QueueSong( const char *filename )
+	{
+		Queue.push_back( filename );
+	}
+	
+	void LoadSong( const char *filename )
 	{
 		SongLoadData *sld = new SongLoadData( this, filename );
-		SDL_Thread *thread = SDL_CreateThread( &SongLoad, sld );
-		if( thread )
-			LoadThreads[ thread ] = sld;
+		if( sld->Thread )
+			LoadingSongs.insert( sld );
 		else
 			delete sld;
 	}
 	
 	void CheckThreads( void )
 	{
-		for( std::map<SDL_Thread*,SongLoadData*>::iterator thread_iter = LoadThreads.begin(); thread_iter != LoadThreads.end(); thread_iter ++ )
+		for( std::set<SongLoadData*>::iterator load_iter = LoadingSongs.begin(); load_iter != LoadingSongs.end(); load_iter ++ )
 		{
-			if( thread_iter->second->Finished )
+			SongLoadData *sld = (*load_iter);
+			
+			if( sld->Finished )
 			{
 				// Finished loading.
 				
 				int unused = 0;
-				SDL_WaitThread( thread_iter->first, &unused );
+				SDL_WaitThread( sld->Thread, &unused );
+				sld->Thread = NULL;
+				
+				Song *song = sld->LoadingSong;
 				
 				// Make sure the song loaded okay.
-				if( thread_iter->second->LoadingSong )
+				if( song )
 				{
-					Song *song = thread_iter->second->LoadingSong;
-					printf( "%s: %.2f BPM, Start %.4f sec, Beats %.1f Found %i, Volume Avg %.2f Max %.2f\n", thread_iter->second->Filename.c_str(), song->BPM, song->FirstBeatFrame / song->Audio.SampleRate, song->TotalBeats(), (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
+					double sec = song->TotalSeconds();
+					int min = ((int) sec ) / 60;
+					sec -= min * 60.;
+					
+					printf( "%s: %.2f BPM, Length %i:%02.1f, Start %.3f sec, Beats %i, Volume Avg %.2f Max %.2f\n", sld->Filename.c_str(), song->BPM, min, sec, song->FirstBeatFrame / song->Audio.SampleRate, (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
 					fflush( stdout );
 					
-					if( thread_iter->second->UD->Repeat )
-						thread_iter->second->UD->Queue.push_back( thread_iter->second->Filename );
+					if( Repeat )
+						QueueSong( sld->Filename.c_str() );
 					
-					bool first_song = thread_iter->second->UD->Songs.empty();
+					bool first_song = Songs.empty();
 					
 					// Only the first song should play pre-beat lead-in.
 					if( ! first_song )
 						song->CurrentFrame = song->FirstBeatFrame;
 					
 					// Done loading and analyzing, so put it in the playback queue.
-					thread_iter->second->UD->Songs.push_back( song );
+					Songs.push_back( song );
+					sld->LoadingSong = NULL;
 					
 					// Start playback after we load the first one successfully.
 					if( first_song )
-					{
-						thread_iter->second->UD->Playing = true;
-						SDL_PauseAudio( 0 );
-					}
+						Playing = true;
 				}
 				
-				delete thread_iter->second;
-				LoadThreads.erase( thread_iter );
+				LoadingSongs.erase( load_iter );
+				delete sld;
 				break;
 			}
 		}
@@ -691,18 +743,21 @@ int SongLoad( void *data_ptr )
 {
 	SongLoadData *data = (SongLoadData*) data_ptr;
 	
-	// Wait 10ms before beginning to load song.
-	SDL_Delay( 10 );
-	
+	SDL_Delay( 1 );
 	data->LoadingSong = new Song( data->Filename );
 	
 	// Make sure it loaded okay.
 	if( data->LoadingSong->Audio.Data && data->LoadingSong->Audio.Size )
 	{
-		// Wait 10ms before beginning to analyze song.
-		SDL_Delay( 10 );
-		
+		SDL_Delay( 1 );
 		data->LoadingSong->Analyze();
+		
+		// Retry if junk got into the start of the audio and messed up analysis.
+		if( data->LoadingSong->Beats.size() < 3 )
+		{
+			SDL_Delay( 1 );
+			data->LoadingSong->Analyze( data->LoadingSong->FirstBeatFrame + 400 );
+		}
 	}
 	else
 	{
@@ -1157,7 +1212,7 @@ int main( int argc, char **argv )
 			// Get all playable files from within the selected directory, or add selected songs directly.
 			std::deque<std::string> songs = DirSongs( argv[ i ] );
 			for( std::deque<std::string>::const_iterator song_iter = songs.begin(); song_iter != songs.end(); song_iter ++ )
-				userdata.Queue.push_back( *song_iter );
+				userdata.QueueSong( (*song_iter).c_str() );
 		}
 	}
 	
@@ -1266,15 +1321,20 @@ int main( int argc, char **argv )
 	bool running = (userdata.Queue.size() || userdata.Songs.size());
 	while( running )
 	{
-		if( userdata.Queue.size() && ((userdata.Songs.size() + userdata.LoadThreads.size()) < 3) )
+		if( userdata.Queue.size() && (userdata.LoadingSongs.size() < 1) && (userdata.Songs.size() < 3) )
 		{
 			std::string song_name = userdata.Queue.front();
 			userdata.Queue.pop_front();
 			
-			userdata.LoadSong( song_name );
+			userdata.LoadSong( song_name.c_str() );
 		}
 		
+		size_t prev_song_count = userdata.Songs.size();
+		
 		userdata.CheckThreads();
+		
+		if( sdl_audio && userdata.Playing && userdata.Songs.size() && ! prev_song_count )
+			SDL_PauseAudio( 0 );
 		
 		if( window )
 		{
@@ -1348,7 +1408,7 @@ int main( int argc, char **argv )
 						}
 					}
 					else if( key == SDLK_BACKSLASH )
-						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->MaxFrame;
+						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
 					else if( key == SDLK_k )
 					{
 						if( userdata.SourceBPM && userdata.Songs.size() )
@@ -1543,10 +1603,10 @@ int main( int argc, char **argv )
 	}
 	
 	// Cleanup before quitting.
-	if( userdata.LoadThreads.size() )
+	if( userdata.LoadingSongs.size() )
 	{
 		printf( "Waiting for threads...\n" );
-		while( userdata.LoadThreads.size() )
+		while( userdata.LoadingSongs.size() )
 		{
 			SDL_Delay( 100 );
 			userdata.CheckThreads();

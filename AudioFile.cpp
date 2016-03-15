@@ -1,13 +1,16 @@
 #include "AudioFile.h"
 
 
-AudioFile::AudioFile( const char *filename )
+Mutex AudioFile::GlobalLock;
+
+
+AudioFile::AudioFile( const char *filename, bool lock )
 {
 	Data = NULL;
 	Clear();
 	
 	if( filename )
-		Load( filename );
+		Load( filename, lock );
 }
 
 
@@ -34,6 +37,7 @@ void AudioFile::Clear( void )
 	audio_stream = NULL;
 	audio_stream_idx = -1;
 	frame = NULL;
+	memset( &pkt, 0, sizeof(AVPacket) );
 	audio_frame_count = 0;
 	decoded = 0;
 	got_frame = 0;
@@ -89,15 +93,18 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 }
 
 
-bool AudioFile::Load( const char *filename )
+bool AudioFile::Load( const char *filename, bool lock )
 {
+	if( lock )
+		GlobalLock.Lock();
+	
 	// open input file, and allocate format context
 	if( avformat_open_input( &fmt_ctx, filename, NULL, NULL ) < 0 )
-		return false;
+		goto end;
 	
 	// retrieve stream information
 	if( avformat_find_stream_info( fmt_ctx, NULL ) < 0 )
-		return false;
+		goto end;
 	
 	if( OpenAudioCodecContext() )
 		audio_stream = fmt_ctx->streams[ audio_stream_idx ];
@@ -172,7 +179,8 @@ bool AudioFile::Load( const char *filename )
 end:
 	if( audio_dec_ctx )
 		avcodec_close( audio_dec_ctx );
-	avformat_close_input( &fmt_ctx );
+	if( fmt_ctx )
+		avformat_close_input( &fmt_ctx );
 	if( frame )
 		av_frame_free( &frame );
 	
@@ -181,6 +189,9 @@ end:
 		avresample_close( avr );
 		avresample_free( &avr );
 	}
+	
+	if( lock )
+		GlobalLock.Unlock();
 	
 	return audio_stream;
 }

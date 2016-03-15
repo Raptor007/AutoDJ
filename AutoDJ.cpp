@@ -704,7 +704,7 @@ public:
 					int min = ((int) sec ) / 60;
 					sec -= min * 60.;
 					
-					printf( "%s: %.2f BPM, Length %i:%02.1f, Start %.3f sec, Beats %i, Volume Avg %.2f Max %.2f\n", sld->Filename.c_str(), song->BPM, min, sec, song->FirstBeatFrame / song->Audio.SampleRate, (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
+					printf( "%s: %.2f BPM, Length %i:%04.1f, Start %.3f sec, Beats %i, Volume Avg %.2f Max %.2f\n", sld->Filename.c_str(), song->BPM, min, sec, song->FirstBeatFrame / song->Audio.SampleRate, (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
 					fflush( stdout );
 					
 					if( Repeat )
@@ -753,7 +753,7 @@ int SongLoad( void *data_ptr )
 		data->LoadingSong->Analyze();
 		
 		// Retry if junk got into the start of the audio and messed up analysis.
-		if( data->LoadingSong->Beats.size() < 3 )
+		for( size_t retry = 0; (retry < 4) && (data->LoadingSong->Beats.size() < 10); retry ++ )
 		{
 			SDL_Delay( 1 );
 			data->LoadingSong->Analyze( data->LoadingSong->FirstBeatFrame + 400 );

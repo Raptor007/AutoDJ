@@ -22,7 +22,7 @@
 #endif
 
 class Song;
-class SongLoadData;
+class SongLoader;
 class UserData;
 
 namespace ResampleMethod
@@ -35,7 +35,7 @@ namespace ResampleMethod
 	};
 }
 
-int SongLoad( void *data_ptr );
+int SongLoaderThread( void *data_ptr );
 double LinearCrossfade( double a, double b, double b_percent );
 double EqualPowerCrossfade( double a, double b, double b_percent );
 Sint16 Finalize( double value );
@@ -542,8 +542,8 @@ public:
 						error_behind += (ddoff * ddoff) / (double) doff_behind.size();
 					}
 					
-					// Attempt to level the playing field.
-					error_behind *= bpm / (double) doff_behind.size();
+					// When it's close, prefer lower BPM to avoid finding every 5th beat.
+					error_behind *= bpm;
 				}
 				
 				if( doff_ahead.size() >= 2 )
@@ -559,8 +559,8 @@ public:
 						error_ahead += (ddoff * ddoff) / (double) doff_ahead.size();
 					}
 					
-					// Attempt to level the playing field.
-					error_behind *= bpm / (double) doff_ahead.size();
+					// When it's close, prefer lower BPM to avoid finding every 5th beat.
+					error_ahead *= bpm;
 				}
 				
 				// Sort differences so we can find median.
@@ -603,25 +603,44 @@ public:
 // --------------------------------------------------------------------------------------
 
 
-class SongLoadData
+class SongLoader
 {
 public:
 	volatile bool Finished;
-	UserData *UD;
+	volatile bool Running;
 	std::string Filename;
 	Song *LoadingSong;
 	SDL_Thread *Thread;
 	
-	SongLoadData( UserData *ud, std::string filename )
+	SongLoader( void )
 	{
-		Finished = false;
-		UD = ud;
-		Filename = std::string( filename.c_str() );
+		Finished = true;
+		Running = true;
 		LoadingSong = NULL;
-		Thread = SDL_CreateThread( &SongLoad, this );
+		Thread = SDL_CreateThread( &SongLoaderThread, this );
 	}
 	
-	~SongLoadData(){}
+	~SongLoader()
+	{
+		Quit();
+	}
+	
+	void StartLoading( const char *filename )
+	{
+		Filename = filename;
+		Finished = false;
+	}
+	
+	void Quit( void )
+	{
+		Running = false;
+		if( Thread )
+		{
+			int unused = 0;
+			SDL_WaitThread( Thread, &unused );
+			Thread = NULL;
+		}
+	}
 };
 
 
@@ -632,6 +651,7 @@ class UserData
 {
 public:
 	bool Playing;
+	bool Running;
 	SDL_AudioSpec Spec;
 	double BPM;
 	bool SourceBPM;
@@ -647,11 +667,12 @@ public:
 	size_t WroteBytes;
 	std::deque<std::string> Queue;
 	std::deque<Song*> Songs;
-	std::set<SongLoadData*> LoadingSongs;
+	SongLoader Loader;
 	
 	UserData( void )
 	{
 		Playing = false;
+		Running = true;
 		memset( &Spec, 0, sizeof(Spec) );
 		BPM = 140.;
 		SourceBPM = true;
@@ -672,30 +693,15 @@ public:
 		Queue.push_back( filename );
 	}
 	
-	void LoadSong( const char *filename )
+	void CheckSongLoading( void )
 	{
-		SongLoadData *sld = new SongLoadData( this, filename );
-		if( sld->Thread )
-			LoadingSongs.insert( sld );
-		else
-			delete sld;
-	}
-	
-	void CheckThreads( void )
-	{
-		for( std::set<SongLoadData*>::iterator load_iter = LoadingSongs.begin(); load_iter != LoadingSongs.end(); load_iter ++ )
+		if( Running )
 		{
-			SongLoadData *sld = (*load_iter);
-			
-			if( sld->Finished )
+			if( Loader.Finished )
 			{
-				// Finished loading.
-				
-				int unused = 0;
-				SDL_WaitThread( sld->Thread, &unused );
-				sld->Thread = NULL;
-				
-				Song *song = sld->LoadingSong;
+				// Get the song pointer and take it away from the loader.
+				Song *song = Loader.LoadingSong;
+				Loader.LoadingSong = NULL;
 				
 				// Make sure the song loaded okay.
 				if( song )
@@ -704,11 +710,8 @@ public:
 					int min = ((int) sec ) / 60;
 					sec -= min * 60.;
 					
-					printf( "%s: %.2f BPM, Length %i:%04.1f, Start %.3f sec, Beats %i, Volume Avg %.2f Max %.2f\n", sld->Filename.c_str(), song->BPM, min, sec, song->FirstBeatFrame / song->Audio.SampleRate, (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
+					printf( "%s: %.2f BPM, Length %i:%04.1f, Start %.3f sec, Beats %i, Volume Avg %.2f Max %.2f\n", Loader.Filename.c_str(), song->BPM, min, sec, song->FirstBeatFrame / song->Audio.SampleRate, (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
 					fflush( stdout );
-					
-					if( Repeat )
-						QueueSong( sld->Filename.c_str() );
 					
 					bool first_song = Songs.empty();
 					
@@ -718,18 +721,30 @@ public:
 					
 					// Done loading and analyzing, so put it in the playback queue.
 					Songs.push_back( song );
-					sld->LoadingSong = NULL;
 					
 					// Start playback after we load the first one successfully.
 					if( first_song )
 						Playing = true;
 				}
 				
-				LoadingSongs.erase( load_iter );
-				delete sld;
-				break;
+				// If we're repeating tracks, put it at the end of the queue.
+				if( Repeat && Loader.Filename.size() )
+					QueueSong( Loader.Filename.c_str() );
+				
+				Loader.Filename.clear();
+				
+				// Start loading the next in the queue.
+				if( Queue.size() && (Songs.size() < 3) )
+				{
+					std::string song_name = Queue.front();
+					Queue.pop_front();
+					
+					Loader.StartLoading( song_name.c_str() );
+				}
 			}
 		}
+		else
+			Loader.Running = false;
 	}
 	
 	~UserData(){}
@@ -739,35 +754,43 @@ public:
 // --------------------------------------------------------------------------------------
 
 
-int SongLoad( void *data_ptr )
+int SongLoaderThread( void *loader_ptr )
 {
-	SongLoadData *data = (SongLoadData*) data_ptr;
+	SongLoader *loader = (SongLoader*) loader_ptr;
 	
-	SDL_Delay( 1 );
-	data->LoadingSong = new Song( data->Filename );
-	
-	// Make sure it loaded okay.
-	if( data->LoadingSong->Audio.Data && data->LoadingSong->Audio.Size )
+	while( loader->Running )
 	{
-		SDL_Delay( 1 );
-		data->LoadingSong->Analyze();
-		
-		// Retry if junk got into the start of the audio and messed up analysis.
-		for( size_t retry = 0; (retry < 4) && (data->LoadingSong->Beats.size() < 10); retry ++ )
+		if( ! loader->Finished )
 		{
-			SDL_Delay( 1 );
-			data->LoadingSong->Analyze( data->LoadingSong->FirstBeatFrame + 400 );
+			loader->LoadingSong = new Song( loader->Filename );
+			
+			// Make sure it loaded okay.
+			if( loader->LoadingSong->Audio.Data && loader->LoadingSong->Audio.Size )
+			{
+				SDL_Delay( 1 );
+				loader->LoadingSong->Analyze();
+				
+				// Retry if junk got into the start of the audio and messed up analysis.
+				for( size_t retry = 0; (retry < 4) && (loader->LoadingSong->Beats.size() < 10); retry ++ )
+				{
+					SDL_Delay( 1 );
+					loader->LoadingSong->Analyze( loader->LoadingSong->FirstBeatFrame + 400 );
+				}
+			}
+			else
+			{
+				// It didn't load correctly, so we won't queue it.  Memory cleanup.
+				delete loader->LoadingSong;
+				loader->LoadingSong = NULL;
+			}
+			
+			// Notify main thread that it should now clean up memory.
+			loader->Finished = true;
 		}
+		
+		// The loader can wait 5sec each time.
+		SDL_Delay( 5000 );
 	}
-	else
-	{
-		// It didn't load correctly, so we won't queue it.  Memory cleanup.
-		delete data->LoadingSong;
-		data->LoadingSong = NULL;
-	}
-	
-	// Notify main thread that it should now clean up memory.
-	data->Finished = true;
 	
 	return 0;
 }
@@ -998,7 +1021,18 @@ void BufferedAudioCallback( void *userdata, Uint8* stream, int len )
 {
 	UserData *ud = (UserData*) userdata;
 	if( ud->Playing )
-		ud->Buffer.FillStream( userdata, stream, len );
+	{
+		int buffered = ud->Buffer.Buffered;
+		if( buffered < len )
+		{
+			// Prevent PlaybackBuffer from calling AudioCallback directly.
+			// This is because AudioCallback isn't fully thread-safe when songs end!
+			ud->Buffer.FillStream( userdata, stream, buffered );
+			memset( stream + buffered, 0, len - buffered );
+		}
+		else
+			ud->Buffer.FillStream( userdata, stream, len );
+	}
 	else
 		memset( stream, 0, len );
 }
@@ -1318,20 +1352,12 @@ int main( int argc, char **argv )
 	int visualizer_color1 = 0, visualizer_color2 = 1;
 	
 	// Keep running until playback is complete.
-	bool running = (userdata.Queue.size() || userdata.Songs.size());
-	while( running )
+	userdata.Running = (userdata.Queue.size() || userdata.Songs.size());
+	while( userdata.Running )
 	{
-		if( userdata.Queue.size() && (userdata.LoadingSongs.size() < 1) && (userdata.Songs.size() < 3) )
-		{
-			std::string song_name = userdata.Queue.front();
-			userdata.Queue.pop_front();
-			
-			userdata.LoadSong( song_name.c_str() );
-		}
-		
 		size_t prev_song_count = userdata.Songs.size();
 		
-		userdata.CheckThreads();
+		userdata.CheckSongLoading();
 		
 		if( sdl_audio && userdata.Playing && userdata.Songs.size() && ! prev_song_count )
 			SDL_PauseAudio( 0 );
@@ -1343,7 +1369,7 @@ int main( int argc, char **argv )
 			{
 				if( event.type == SDL_QUIT )
 				{
-					running = false;
+					userdata.Running = false;
 					if( sdl_audio )
 						SDL_PauseAudio( 1 );
 				}
@@ -1352,7 +1378,7 @@ int main( int argc, char **argv )
 					SDLKey key = event.key.keysym.sym;
 					if( key == SDLK_q )
 					{
-						running = false;
+						userdata.Running = false;
 						if( sdl_audio )
 							SDL_PauseAudio( 1 );
 					}
@@ -1580,7 +1606,7 @@ int main( int argc, char **argv )
 			WaveOutCheck( &userdata );
 #endif
 		
-		running = running && (userdata.Queue.size() || userdata.Songs.size() || userdata.Buffer.Buffered);
+		userdata.Running = userdata.Running && (userdata.Queue.size() || userdata.Songs.size() || userdata.Buffer.Buffered);
 	}
 	
 	if( userdata.WriteTo )
@@ -1603,14 +1629,12 @@ int main( int argc, char **argv )
 	}
 	
 	// Cleanup before quitting.
-	if( userdata.LoadingSongs.size() )
+	userdata.Loader.Running = userdata.Running;
+	if( ! userdata.Loader.Finished )
 	{
-		printf( "Waiting for threads...\n" );
-		while( userdata.LoadingSongs.size() )
-		{
+		printf( "Waiting for loader thread...\n" );
+		while( ! userdata.Loader.Finished )
 			SDL_Delay( 100 );
-			userdata.CheckThreads();
-		}
 	}
 	userdata.Queue.clear();
 	while( userdata.Songs.size() )

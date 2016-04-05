@@ -1,7 +1,7 @@
 PREFIX = /usr
 CC = $(PREFIX)/bin/g++
 O = 2
-CFLAGS = -O$(O) -g -march=native -mfpmath=sse -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing
+CFLAGS = -O$(O) -march=native -mfpmath=sse -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing
 INC = $(PREFIX)/include $(PREFIX)/include/SDL
 LIB = libSDLmain.a libSDL.so ../local/lib/libavdevice.a ../local/lib/libavformat.a ../local/lib/libavfilter.a ../local/lib/libavcodec.a ../local/lib/libavresample.a ../local/lib/libswscale.a ../local/lib/libavutil.a ../local/lib/libswresample.a liblzma.so libbz2.a libz.a
 LIBDIR = $(PREFIX)/lib
@@ -51,7 +51,7 @@ autodj AutoDJ AutoDJ.exe: $(patsubst %.cpp,%.o,$(wildcard *.cpp))
 	chmod ugo+rx $@
 
 %.o: %.cpp $(wildcard *.h)
-	$(CC) $(CFLAGS) -c $< $(foreach inc,$(INC),-I$(inc)) -o $@
+	$(CC) $(CFLAGS) -g -c $< $(foreach inc,$(INC),-I$(inc)) -o $@
 
 clean:
 	rm -rf *.o autodj AutoDJ AutoDJ.app

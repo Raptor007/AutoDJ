@@ -20,6 +20,9 @@
 #ifdef WAVEOUT
 #include <windows.h>
 #endif
+extern "C" {
+#include <libavcodec/avfft.h>
+}
 
 class Song;
 class SongLoader;
@@ -42,6 +45,8 @@ Sint16 Finalize( double value );
 bool CalculateCrossfade( const Song *current_song, const Song *next_song, double *crossfade_for_beats, double *crossfade_at_beat );
 void AudioCallback( void *userdata, Uint8* stream, int len );
 void BufferedAudioCallback( void *userdata, Uint8* stream, int len );
+void UnbufferedAudioCallback( void *userdata, Uint8* stream, int len );
+void UpdateVisualizerBuffer( UserData *ud, Uint8 *stream, int len );
 std::deque<std::string> DirSongs( std::string path );
 
 #ifndef likely
@@ -668,6 +673,9 @@ public:
 	std::deque<std::string> Queue;
 	std::deque<Song*> Songs;
 	SongLoader Loader;
+	Uint8 *VisualizerBuffer;
+	int VisualizerBufferSize;
+	clock_t VisualizerClock;
 	
 	UserData( void )
 	{
@@ -686,6 +694,9 @@ public:
 		Buffer.SetSize( 131072 );
 		WriteTo = NULL;
 		WroteBytes = 0;
+		VisualizerBuffer = NULL;
+		VisualizerBufferSize = 0;
+		VisualizerClock = 0;
 	}
 	
 	void QueueSong( const char *filename )
@@ -1017,7 +1028,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 }
 
 
-void BufferedAudioCallback( void *userdata, Uint8* stream, int len )
+void BufferedAudioCallback( void *userdata, Uint8 *stream, int len )
 {
 	UserData *ud = (UserData*) userdata;
 	if( ud->Playing )
@@ -1035,6 +1046,23 @@ void BufferedAudioCallback( void *userdata, Uint8* stream, int len )
 	}
 	else
 		memset( stream, 0, len );
+	
+	UpdateVisualizerBuffer( ud, stream, len );
+}
+
+
+void UnbufferedAudioCallback( void *userdata, Uint8 *stream, int len )
+{
+	AudioCallback( userdata, stream, len );
+	
+	UpdateVisualizerBuffer( (UserData*) userdata, stream, len );
+}
+
+
+void UpdateVisualizerBuffer( UserData *ud, Uint8 *stream, int len )
+{
+	memcpy( ud->VisualizerBuffer, stream, std::min<int>( len, ud->VisualizerBufferSize ) );
+	ud->VisualizerClock = clock();
 }
 
 
@@ -1127,6 +1155,11 @@ void WaveOutCheck( UserData *ud )
 		// Swap buffers.
 		WaveOutBufferNum ++;
 		WaveOutBufferNum %= 2;
+		
+		// Point the visualizer to the other buffer, because that one is playing sooner.
+		ud->VisualizerBuffer = WaveOutBuffers[ WaveOutBufferNum ];
+		ud->VisualizerBufferSize = WaveOutBufferSize;
+		ud->VisualizerClock = clock();
 	}
 }
 
@@ -1156,7 +1189,7 @@ int main( int argc, char **argv )
 	bool shuffle = true;
 	bool window = true;
 	bool fullscreen = false;
-	bool visualizer = true;
+	int visualizer = 1;
 	bool playback = true;
 	bool sdl_audio = true;
 #ifdef WAVEOUT
@@ -1189,8 +1222,8 @@ int main( int argc, char **argv )
 				window = true;
 				fullscreen = true;
 			}
-			else if( strcasecmp( argv[ i ], "--no-visualizer" ) == 0 )
-				visualizer = false;
+			else if( strncasecmp( argv[ i ], "--visualizer=", strlen("--visualizer=") ) == 0 )
+				visualizer = atoi( argv[ i ] + strlen("--visualizer=") );
 			else if( strcasecmp( argv[ i ], "--no-shuffle" ) == 0 )
 				shuffle = false;
 			else if( strcasecmp( argv[ i ], "--no-repeat" ) == 0 )
@@ -1280,7 +1313,7 @@ int main( int argc, char **argv )
 	if( userdata.Buffer.BufferSize > 0 )
 		want.callback = BufferedAudioCallback;
 	else
-		want.callback = AudioCallback;
+		want.callback = UnbufferedAudioCallback;
 	memcpy( &(userdata.Spec), &want, sizeof(want) );
 	if( playback )
 	{
@@ -1327,13 +1360,27 @@ int main( int argc, char **argv )
 						// WaveOut is ready to go with 2 output buffers, so don't use SDL_audio.
 						WaveOutBuffersNeeded = 2;
 						sdl_audio = false;
+						
+						if( screen )
+						{
+							userdata.VisualizerBufferSize = WaveOutBufferSize;
+							userdata.VisualizerBuffer = WaveOutBuffers[ 0 ];
+						}
 					}
 				}
 			}
 		}
 #endif
 		if( sdl_audio )
+		{
 			SDL_OpenAudio( &want, &(userdata.Spec) );
+			
+			if( screen )
+			{
+				userdata.VisualizerBufferSize = userdata.Spec.samples * userdata.Spec.channels * 2;
+				userdata.VisualizerBuffer = (Uint8*) malloc( userdata.VisualizerBufferSize );
+			}
+		}
 	}
 	
 	if( write )
@@ -1346,10 +1393,15 @@ int main( int argc, char **argv )
 	}
 	
 	// Visualizer variables.
+	clock_t visualizer_updated_clock = 0, visualizer_prev_clock = 0;
 	size_t visualizer_start_sample = 0;
-	int visualizer_last_sent = 0;
 	size_t visualizer_loading_frame = 0;
 	int visualizer_color1 = 0, visualizer_color2 = 1;
+	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * 2);
+	int visualizer_fft_frames = visualizer_frames / 4;
+	FFTContext *visualizer_fft_context = av_fft_init( log2(visualizer_fft_frames), false );
+	FFTComplex *visualizer_fft_complex = (FFTComplex*) av_mallocz( visualizer_fft_frames * sizeof(FFTComplex) );
+	int visualizer_fft_width_offset = 0;
 	
 	// Keep running until playback is complete.
 	userdata.Running = (userdata.Queue.size() || userdata.Songs.size());
@@ -1490,7 +1542,13 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_v )
 					{
-						visualizer = ! visualizer;
+						if( screen )
+						{
+							visualizer ++;
+							visualizer %= 4;
+						}
+						else
+							visualizer = 0;
 						
 						if( screen && ! visualizer )
 						{
@@ -1522,77 +1580,150 @@ int main( int argc, char **argv )
 		{
 			// Add some data to the playback buffer.
 			userdata.Buffer.AddToBuffer( &userdata, 16384 );
-			
-			// Visualize the waveform in the window.
-			if( visualizer && screen && (userdata.Playing || userdata.Songs.empty()) )
+		}
+		
+		// Wait 10ms.
+		SDL_Delay( 10 );
+		
+		// Visualize the waveform in the window.
+		if( visualizer && screen && (userdata.Playing || userdata.Songs.empty()) )
+		{
+			// Keep the visualizer synchronized with the audio playback.
+			if( userdata.Playing )
 			{
-				Uint32 colors[ 3 ];
-				colors[ 0 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
-				colors[ 1 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 );
-				colors[ 2 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 );
-				Uint32* pixels = (Uint32*) screen->pixels;
-				SDL_LockSurface( screen );
-				for( int x = 0; x < screen->w; x ++ )
+				if( userdata.VisualizerClock != visualizer_updated_clock )
 				{
-					// Fade the previous pixel value.
-					for( int y = 0; y < screen->h; y ++ )
+					visualizer_updated_clock = userdata.VisualizerClock;
+					visualizer_start_sample = 0;
+					visualizer_prev_clock = clock();
+				}
+				else
+				{
+					clock_t now = clock();
+					size_t frames = userdata.Spec.freq * (now - visualizer_prev_clock) / (double) CLOCKS_PER_SEC;
+					visualizer_prev_clock = now;
+					visualizer_start_sample += userdata.Spec.channels * frames;
+					visualizer_start_sample %= userdata.VisualizerBufferSize / (userdata.Spec.channels * 2);
+				}
+			}
+			else
+			{
+				visualizer_loading_frame ++;
+				visualizer_loading_frame %= screen->h;
+				visualizer_prev_clock = clock();
+			}
+			
+			Uint32 colors[ 3 ];
+			colors[ 0 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+			colors[ 1 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 );
+			colors[ 2 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 );
+			Uint32* pixels = (Uint32*) screen->pixels;
+			SDL_LockSurface( screen );
+			
+			for( int x = 0; x < screen->w; x ++ )
+			{
+				// Fade the previous pixel value.
+				for( int y = 0; y < screen->h; y ++ )
+				{
+					Uint8 r = 0x00, g = 0x00, b = 0x00;
+					SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
+					pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
+				}
+				
+				if( userdata.Playing )
+				{
+					if( visualizer == 1 )
 					{
-						Uint8 r = 0x00, g = 0x00, b = 0x00;
-						SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
-					}
-					
-					if( userdata.Playing )
-					{
-						// Keep the visualizer synchronized with the audio playback.
-						if( userdata.Buffer.LastSent != visualizer_last_sent )
-						{
-							visualizer_last_sent = userdata.Buffer.LastSent;
-							visualizer_start_sample = (visualizer_last_sent - userdata.Spec.samples + userdata.Buffer.BufferSize) % userdata.Buffer.BufferSize;
-						}
-						
 						// Fill in the waveform.
-						for( int c = userdata.Spec.channels - 1; c >= 0; c -- )
+						for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
 						{
-							Sint16 raw = ((Sint16*)( userdata.Buffer.Buffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + c) % (userdata.Buffer.BufferSize / 2) ];
+							Sint16 raw = ((Sint16*)( userdata.VisualizerBuffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + ch) % (userdata.VisualizerBufferSize / 2) ];
 							float amplitude = raw / 32767.f;
 							float volume = userdata.Volume;
 							if( (volume > 0.f) && (volume < 1.f) )
 								amplitude /= volume;
 							int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
-							pixels[ y * screen->w + x ] = (c % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
+							pixels[ y * screen->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 						}
 					}
-					else
-					{
-						// Loading animation.
-						int y1 = ((screen->h - x) % screen->h + screen->h + visualizer_loading_frame) % screen->h;
-						int y2 = (y1 + screen->h / 2) % screen->h;
-						pixels[ y1 * screen->w + x ] = colors[ visualizer_color1 ];
-						pixels[ y2 * screen->w + x ] = colors[ visualizer_color2 ];
-					}
-				}
-				SDL_UnlockSurface( screen );
-				SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
-				
-				if( userdata.Playing )
-				{
-					visualizer_start_sample += screen->w * userdata.Spec.channels;
-					visualizer_start_sample %= userdata.Buffer.BufferSize / 2;
 				}
 				else
 				{
-					visualizer_loading_frame ++;
-					visualizer_loading_frame %= screen->h;
+					// Loading animation.
+					int y1 = ((screen->h - x) % screen->h + screen->h + visualizer_loading_frame) % screen->h;
+					int y2 = (y1 + screen->h / 2) % screen->h;
+					pixels[ y1 * screen->w + x ] = colors[ visualizer_color1 ];
+					pixels[ y2 * screen->w + x ] = colors[ visualizer_color2 ];
 				}
 			}
 			
-			// Wait 10ms.
-			SDL_Delay( 10 );
+			if( userdata.Playing && (visualizer == 2) )
+			{
+				// Show spectrum of frequencies.
+				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
+				float base = pow( 2., log2( visualizer_fft_frames/2 ) / (screen->w + visualizer_fft_width_offset) );
+				for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
+				{
+					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
+					for( int i = 0; i < frames; i ++ )
+						visualizer_fft_complex[ i ].re = ((Sint16*)( userdata.VisualizerBuffer ))[ visualizer_start_sample + (i * userdata.Spec.channels) + ch ] / 32767.f;
+					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
+					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
+					int offset = 0;
+					for( int x = 0; x < screen->w; x ++ )
+					{
+						int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, x ) );
+						int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, x + 1 ) );
+						if( band_min == band_max )
+						{
+							offset ++;
+							band_max ++;
+						}
+						float harmonics = 1.f + log2( (visualizer_fft_frames/2) / band_max );
+						float amplitude = 0.f;
+						for( int band = band_min; band < band_max; band ++ )
+							amplitude += sqrt( visualizer_fft_complex[ band ].re * visualizer_fft_complex[ band ].re + visualizer_fft_complex[ band ].im * visualizer_fft_complex[ band ].im );
+						float volume = userdata.Volume;
+						if( (volume > 0.f) && (volume < 1.f) )
+							amplitude /= volume;
+						int h = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * amplitude / std::max<float>( 8.f, pow(2.f,harmonics) ) ) );
+						for( int y = screen->h - 1 - h; y < screen->h; y ++ )
+							pixels[ y * screen->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
+					}
+					visualizer_fft_width_offset = offset;
+				}
+			}
+			else if( userdata.Playing && (visualizer == 3) )
+			{
+				// Show left/right separation.
+				for( int samples = 128; samples >= 2; samples /= 2 )
+				{
+					float amplitude_left = 0, amplitude_right = 0;
+					for( int x = 0; x < samples; x ++ )
+					{
+						for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
+						{
+							Sint16 raw = ((Sint16*)( userdata.VisualizerBuffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + ch) % (userdata.VisualizerBufferSize / 2) ];
+							float amplitude = raw / 32767.f;
+							float volume = userdata.Volume;
+							if( (volume > 0.f) && (volume < 1.f) )
+								amplitude /= volume;
+							((ch % 2) ? amplitude_right : amplitude_left) += fabs(amplitude) / (1.5f * samples);
+						}
+					}
+					if( userdata.Spec.channels == 1 )
+						amplitude_right = amplitude_left;
+					float amplitude = amplitude_left + amplitude_right;
+					int x = std::max<int>( 0, std::min<int>( screen->w - 1, (amplitude ? (amplitude_right / amplitude) : 0.5) * screen->w ) );
+					int h = std::min<int>( screen->h / 2, amplitude * screen->h );
+					for( int y = screen->h / 2 - h; y < screen->h / 2 + h; y ++ )
+						pixels[ y * screen->w + x ] = (samples >= 16) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
+				}
+			}
+			
+			SDL_UnlockSurface( screen );
+			SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
 		}
-		else
-			// Not buffering playback, so delay 100ms.
-			SDL_Delay( 100 );
 		
 		// If we're not playing back audio, advance by 1024 bytes.
 		// This is mostly for valgrind debugging to avoid alsa buffer underrun warnings.
@@ -1630,6 +1761,8 @@ int main( int argc, char **argv )
 	
 	// Cleanup before quitting.
 	userdata.Loader.Running = userdata.Running;
+	av_fft_end( visualizer_fft_context );
+	av_free( visualizer_fft_complex );
 	if( ! userdata.Loader.Finished )
 	{
 		printf( "Waiting for loader thread...\n" );

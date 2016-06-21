@@ -32,6 +32,7 @@ LIBDIR = $(PREFIX)/lib
 LIB = libiconv.a
 LIBRARIES := -lmingw32 -lSDLmain -lSDL -lavdevice -lavformat -lavfilter -lavcodec -lavresample -lswscale -lavutil -lswresample $(LIBRARIES) -lws2_32 -lsecur32 -lwinmm
 TARGET = AutoDJ.exe
+MISC_OBJ = AutoDJ.res
 INSTALL_DIR = /usr/bin
 endif
 
@@ -43,11 +44,17 @@ AutoDJ.app: AutoDJ Info.plist
 	mkdir -p $@/Contents/MacOS
 	cp AutoDJ $@/Contents/MacOS/
 	rsync -ax Info.plist $@/Contents/
+	mkdir -p $@/Contents/MacOS/Resources
+	rsync -ax AutoDJ.icns $@/Contents/Resources/
 	-cp $(PREFIX)/lib/libgcc/libstdc++.6.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libstdc++.6.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libgcc/libstdc++.6.dylib "@executable_path/libstdc++.6.dylib" $@/Contents/MacOS/AutoDJ
 	-cp $(PREFIX)/lib/libgcc/libgcc_s.1.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libgcc_s.1.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libgcc/libgcc_s.1.dylib "@executable_path/libgcc_s.1.dylib" $@/Contents/MacOS/AutoDJ
+	-codesign -s Raptor007 $@
 
-autodj AutoDJ AutoDJ.exe: $(patsubst %.cpp,%.o,$(wildcard *.cpp))
-	$(CC) $(CFLAGS) $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(LIBRARIES) $(FRAMEWORKS) -o $@
+AutoDJ.res: AutoDJ.rc
+	windres $< -O coff -o $@
+
+autodj AutoDJ AutoDJ.exe: $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(MISC_OBJ)
+	$(CC) $(CFLAGS) $^ $(LIBRARIES) $(FRAMEWORKS) -o $@
 	chmod ugo+rx $@
 
 %.o: %.cpp $(wildcard *.h)

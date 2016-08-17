@@ -10,6 +10,7 @@ LIBDIR = $(PREFIX)/lib64
 endif
 LIBRARIES = $(foreach lib,$(LIB),$(LIBDIR)/$(lib))
 FRAMEWORKS = $(foreach fw,$(FW),-framework $(fw))
+MISC_OBJ = FontBin.o
 TARGET = autodj
 INSTALL_DIR = /usr/local/bin
 UNAME = $(shell uname)
@@ -32,7 +33,7 @@ LIBDIR = $(PREFIX)/lib
 LIB = libiconv.a
 LIBRARIES := -lmingw32 -lSDLmain -lSDL -lavdevice -lavformat -lavfilter -lavcodec -lavresample -lswscale -lavutil -lswresample $(LIBRARIES) -lws2_32 -lsecur32 -lwinmm
 TARGET = AutoDJ.exe
-MISC_OBJ = AutoDJ.res
+MISC_OBJ += AutoDJ.res
 INSTALL_DIR = /usr/bin
 endif
 
@@ -52,6 +53,9 @@ AutoDJ.app: AutoDJ Info.plist
 
 AutoDJ.res: AutoDJ.rc
 	windres $< -O coff -o $@
+
+FontBin.o: FontBin.s Font1.bmp Font2.bmp
+	$(CC) $(CFLAGS) -g -c $< -o $@
 
 autodj AutoDJ AutoDJ.exe: $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(MISC_OBJ)
 	$(CC) $(CFLAGS) $^ $(LIBRARIES) $(FRAMEWORKS) -o $@

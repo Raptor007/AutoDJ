@@ -17,6 +17,8 @@
 #include <SDL/SDL_audio.h>
 #include "AudioFile.h"
 #include "PlaybackBuffer.h"
+#include "FontDraw.h"
+#include "FontBin.h"
 #ifdef WAVEOUT
 #include <windows.h>
 #endif
@@ -68,6 +70,12 @@ std::deque<std::string> DirSongs( std::string path );
 #endif
 #endif
 
+#ifdef WIN32
+#define PATH_SEPARATOR "\\"
+#else
+#define PATH_SEPARATOR "/"
+#endif
+
 
 // --------------------------------------------------------------------------------------
 
@@ -107,6 +115,30 @@ public:
 		}
 		else
 			TotalFrames = 0;
+		
+		if( Audio.Tags.find("title") == Audio.Tags.end() )
+		{
+			const char *last_slash = filename, *this_slash = NULL;
+			while(( this_slash = strstr( last_slash + 1, PATH_SEPARATOR ) ))
+				last_slash = this_slash;
+			std::string title;
+			if( strncmp( last_slash, PATH_SEPARATOR, strlen(PATH_SEPARATOR) ) == 0 )
+				title = std::string( last_slash + strlen(PATH_SEPARATOR) );
+			else
+				title = std::string( last_slash );
+			
+			std::string::size_type last_dot = title.rfind('.');
+			if( last_dot != std::string::npos )
+				Audio.Tags["title"] = title.substr( 0, last_dot );
+		}
+	}
+	
+	const char *GetTag( const std::string &name ) const
+	{
+		std::map<std::string,std::string>::const_iterator tag = Audio.Tags.find(name);
+		if( tag != Audio.Tags.end() )
+			return tag->second.c_str();
+		return NULL;
 	}
 	
 	~Song()
@@ -606,6 +638,12 @@ public:
 		else if( bpm_fpart > bpm_rounding )
 			BPM += bpm_fpart;
 		
+		// Sanity-check the BPM, and scale it to the expected range.
+		if( BPM < 80. )
+			BPM *= 2.;
+		else if( BPM > 160. )
+			BPM /= 2.;
+		
 		FirstBeatFrame = best_first_beat;
 	}
 };
@@ -664,6 +702,7 @@ class UserData
 public:
 	bool Playing;
 	bool Running;
+	bool Crossfading;
 	SDL_AudioSpec Spec;
 	double BPM;
 	bool SourceBPM;
@@ -684,11 +723,17 @@ public:
 	Uint8 *VisualizerBuffer;
 	int VisualizerBufferSize;
 	clock_t VisualizerClock;
+	char Title[ 128 ];
+	char Artist[ 128 ];
+	char Album[ 128 ];
+	char Message[ 128 ];
+	time_t MessageUntil;
 	
 	UserData( void )
 	{
 		Playing = false;
 		Running = true;
+		Crossfading = false;
 		memset( &Spec, 0, sizeof(Spec) );
 		BPM = 140.;
 		SourceBPM = true;
@@ -706,6 +751,18 @@ public:
 		VisualizerBuffer = NULL;
 		VisualizerBufferSize = 0;
 		VisualizerClock = 0;
+		memset( Title, 0, 128 );
+		strcpy( Title, "Loading..." );
+		memset( Artist, 0, 128 );
+		memset( Album, 0, 128 );
+		memset( Message, 0, 128 );
+		MessageUntil = time(NULL) - 1;
+	}
+	
+	void SetMessage( const char *message, int seconds )
+	{
+		snprintf( Message, 128, "%s", message );
+		MessageUntil = time(NULL) + seconds;
 	}
 	
 	void QueueSong( const char *filename )
@@ -717,6 +774,8 @@ public:
 	{
 		if( Running )
 		{
+			bool changed_song = false;
+			
 			// Remove any songs that have finished playback.
 			while( MostRecentToRemove && Songs.size() )
 			{
@@ -725,6 +784,8 @@ public:
 					MostRecentToRemove = NULL;
 				Songs.pop_front();
 				delete current_song;
+				
+				changed_song = true;
 			}
 			
 			if( Loader.Finished )
@@ -754,7 +815,10 @@ public:
 					
 					// Start playback after we load the first one successfully.
 					if( first_song )
+					{
 						Playing = true;
+						changed_song = true;
+					}
 				}
 				
 				// If we're repeating tracks, put it at the end of the queue.
@@ -770,6 +834,27 @@ public:
 					Queue.pop_front();
 					
 					Loader.StartLoading( song_name.c_str() );
+				}
+			}
+			
+			// Update visualizer text.
+			if( changed_song )
+			{
+				Title[ 0 ] = '\0';
+				Artist[ 0 ] = '\0';
+				Album[ 0 ] = '\0';
+				if( Songs.size() )
+				{
+					const Song *current_song = Songs.front();
+					const char *title = current_song->GetTag("title");
+					if( title )
+						snprintf( Title, 128, "%s", title );
+					const char *artist = current_song->GetTag("artist");
+					if( artist )
+						snprintf( Artist, 128, "%s", artist );
+					const char *album = current_song->GetTag("album");
+					if( album )
+						snprintf( Album, 128, "%s", album );
 				}
 			}
 		}
@@ -949,8 +1034,14 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				if( calculated_crossfade && (current_song->Beat() >= crossfade_at_beat) )
 				{
 					crossfade_now = true;
-					crossfade = (current_song->Beat() - crossfade_at_beat) / crossfade_for_beats;
-					if( crossfade > 1. )
+					
+					if( crossfade_for_beats > 0. )
+					{
+						crossfade = (current_song->Beat() - crossfade_at_beat) / crossfade_for_beats;
+						if( crossfade > 1. )
+							crossfade = 1.;
+					}
+					else
 						crossfade = 1.;
 				}
 			}
@@ -1007,6 +1098,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 					crossfade = 0.;
 				}
 			}
+			
+			ud->Crossfading = crossfade_now;
 			
 			
 			// Add metronome if enabled.
@@ -1108,12 +1201,6 @@ std::deque<std::string> DirSongs( std::string path )
 		{
 			struct dirent *entry = NULL;
 			
-			#ifdef WIN32
-				#define PATH_SEPARATOR "\\"
-			#else
-				#define PATH_SEPARATOR "/"
-			#endif
-			
 			while( (entry = readdir(dir)) )
 			{
 				if( entry->d_name[ 0 ] == '.' )
@@ -1195,20 +1282,7 @@ void WaveOutCheck( UserData *ud )
 
 int main( int argc, char **argv )
 {
-	// If no arguments were given, search the default music directory.
-	if( argc == 1 )
-	{
-		char cmd[ 102400 ] = "";
-		#ifdef WIN32
-			const char *DEFAULT_ARGS = "\"M:\\iTunes\\iTunes\\ Music\\Trance\"";
-		#else
-			const char *DEFAULT_ARGS = "~/Music/iTunes/iTunes\\ Music/Trance /Volumes/Media/Music/iTunes/iTunes\\ Music/Trance &";
-		#endif
-		snprintf( cmd, 102400, "\"%s\" %s", argv[ 0 ], DEFAULT_ARGS );
-		system( cmd );
-		return 0;
-	}
-	
+	std::vector<const char*> paths;
 	UserData userdata;
 	bool shuffle = true;
 	bool window = true;
@@ -1229,6 +1303,7 @@ int main( int argc, char **argv )
 	want.samples = 4096;
 	want.callback = BufferedAudioCallback;
 	want.userdata = &userdata;
+	FontDraw font1(FONT1), font2(FONT2);
 	
 	// Process command-line arguments.
 	for( int i = 1; i < argc; i ++ )
@@ -1300,11 +1375,34 @@ int main( int argc, char **argv )
 				len --;
 			}
 			
-			// Get all playable files from within the selected directory, or add selected songs directly.
-			std::deque<std::string> songs = DirSongs( argv[ i ] );
-			for( std::deque<std::string>::const_iterator song_iter = songs.begin(); song_iter != songs.end(); song_iter ++ )
-				userdata.QueueSong( (*song_iter).c_str() );
+			paths.push_back( path );
 		}
+	}
+	
+	if( ! paths.size() )
+	{
+		// If no music was dropped onto the icon or specified on the command-line, use default paths.
+		#ifdef WIN32
+		paths.push_back( "M:\\iTunes\\iTunes Music\\Trance" );
+		#else
+		char *home = getenv("HOME");
+		if( home )
+		{
+			int path_size = strlen(home) + strlen("/Music/iTunes/iTunes Music/Trance") + 1;
+			char *path = (char*) alloca( path_size );
+			snprintf( path, path_size, "%s/Music/iTunes/iTunes Music/Trance", home );
+			paths.push_back( path );
+		}
+		paths.push_back( "/Volumes/Media/Music/iTunes/iTunes Music/Trance" );
+		#endif
+	}
+	
+	for( size_t i = 0; i < paths.size(); i ++ )
+	{
+		// Get all playable files from within the selected directory, or add selected songs directly.
+		std::deque<std::string> songs = DirSongs( paths[ i ] );
+		for( std::deque<std::string>::const_iterator song_iter = songs.begin(); song_iter != songs.end(); song_iter ++ )
+			userdata.QueueSong( (*song_iter).c_str() );
 	}
 	
 	// Seed the random number generator (for shuffle).
@@ -1429,6 +1527,7 @@ int main( int argc, char **argv )
 	FFTComplex *visualizer_fft_complex_r = (FFTComplex*) av_mallocz( visualizer_fft_frames * sizeof(FFTComplex) );
 	int visualizer_fft_width_offset = 0;
 	int visualizer_fft_height_offset = 0;
+	char visualizer_message[ 128 ] = "";
 	
 	// Keep running until playback is complete.
 	userdata.Running = (userdata.Queue.size() || userdata.Songs.size());
@@ -1468,53 +1567,84 @@ int main( int argc, char **argv )
 						if( sdl_audio )
 							SDL_PauseAudio( userdata.Playing ? 0 : 1 );
 					}
+					else if( key == SDLK_0 )
+					{
+						userdata.Volume = 1.;
+						snprintf( visualizer_message, 128, "Volume: %.0f%%\n", userdata.Volume * 100. );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
 					else if( key == SDLK_MINUS )
 					{
 						userdata.Volume -= 0.0625;
-						printf( "Volume: %.3f\n", userdata.Volume );
+						snprintf( visualizer_message, 128, "Volume: %.0f%%\n", userdata.Volume * 100. );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_EQUALS )
 					{
 						userdata.Volume += 0.0625;
-						printf( "Volume: %.3f\n", userdata.Volume );
+						snprintf( visualizer_message, 128, "Volume: %.0f%%\n", userdata.Volume * 100. );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_BACKSPACE )
 					{
 						userdata.VolumeMatching = ! userdata.VolumeMatching;
-						printf( "Volume Matching: %s\n", userdata.VolumeMatching ? "On" : "Off" );
+						snprintf( visualizer_message, 128, "Volume Matching: %s\n", userdata.VolumeMatching ? "On" : "Off" );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_p )
 					{
 						userdata.PreventClipping = ! userdata.PreventClipping;
-						printf( "Prevent Clipping: %s\n", userdata.PreventClipping ? "On" : "Off" );
+						snprintf( visualizer_message, 128, "Prevent Clipping: %s\n", userdata.PreventClipping ? "On" : "Off" );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_LEFTBRACKET || key == SDLK_LEFT )
 					{
-						Song *current_song = userdata.Songs.front();
-						current_song->CurrentFrame = 0.;
-						current_song->FirstOutroFrame = 0.;
-						current_song->OutroBeats = 128;
+						if( userdata.Songs.size() )
+						{
+							Song *current_song = userdata.Songs.front();
+							current_song->CurrentFrame = 0.;
+							current_song->FirstOutroFrame = 0.;
+							current_song->OutroBeats = 128;
+						}
 					}
 					else if( key == SDLK_RIGHTBRACKET || key == SDLK_RIGHT )
 					{
-						Song *current_song = userdata.Songs.front();
-						int beat = current_song->Beat();
-						if( current_song->FirstOutroFrame && (current_song->FrameAtBeat(beat) >= current_song->FirstOutroFrame) )
-							current_song->OutroBeats /= 2;
-						else
+						if( userdata.Songs.size() )
 						{
-							double expected_beat = beat - (beat % 16);
-							double actual_beat = current_song->NearestBeatAtBeat( expected_beat );
-							current_song->FirstOutroFrame = current_song->FrameAtBeat( (fabs( actual_beat - expected_beat ) < 32.) ? actual_beat : expected_beat );
-							current_song->OutroBeats = std::min<int>( 64, current_song->TotalBeats() - beat );
+							Song *current_song = userdata.Songs.front();
+							int beat = current_song->Beat();
+							if( userdata.Crossfading )
+							{
+								current_song->FirstOutroFrame = 1.;
+								current_song->OutroBeats = 1;
+							}
+							else
+							{
+								int rewind_to_major_beat = beat % 16;
+								double expected_beat = beat - rewind_to_major_beat;
+								if( rewind_to_major_beat >= 8 )
+									expected_beat += 16.;
+								double actual_beat = current_song->NearestBeatAtBeat( expected_beat );
+								current_song->FirstOutroFrame = current_song->FrameAtBeat( (fabs( actual_beat - expected_beat ) < 32.) ? actual_beat : expected_beat );
+								current_song->OutroBeats = std::min<int>( 64, current_song->TotalBeats() - beat );
+							}
 						}
 					}
 					else if( key == SDLK_BACKSLASH )
-						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
+					{
+						if( userdata.Songs.size() )
+							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
+					}
 					else if( key == SDLK_k )
 					{
 						if( userdata.SourceBPM && userdata.Songs.size() )
@@ -1522,7 +1652,9 @@ int main( int argc, char **argv )
 						
 						userdata.BPM -= 1.;
 						userdata.SourceBPM = false;
-						printf( "Playback BPM: %.2f\n", userdata.BPM );
+						snprintf( visualizer_message, 128, "Playback BPM: %.0f\n", userdata.BPM );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_l )
@@ -1532,40 +1664,63 @@ int main( int argc, char **argv )
 						
 						userdata.BPM += 1.;
 						userdata.SourceBPM = false;
-						printf( "Playback BPM: %.2f\n", userdata.BPM );
+						snprintf( visualizer_message, 128, "Playback BPM: %.0f\n", userdata.BPM );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_SEMICOLON || key == SDLK_DOWN )
 					{
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale /= pow( 2., 1./12. );
-						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
+						snprintf( visualizer_message, 128, "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_QUOTE || key == SDLK_UP )
 					{
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale *= pow( 2., 1./12. );
-						printf( "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
-						fflush( stdout );
+						snprintf( visualizer_message, 128, "Pitch: %.1f%%\n", userdata.SourcePitchScale * 100. );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 					}
 					else if( key == SDLK_m )
 						userdata.Metronome = ! userdata.Metronome;
 					else if( key == SDLK_COMMA )
 					{
-						int beat = userdata.Songs.front()->Beat();
-						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) - 32 );
+						if( userdata.Songs.size() )
+						{
+							Song *current_song = userdata.Songs.front();
+							int beat = current_song->Beat();
+							current_song->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) - 32 );
+							if( current_song->CurrentFrame < 0. )
+								current_song->CurrentFrame = 0.;
+						}
 					}
 					else if( key == SDLK_PERIOD )
 					{
-						int beat = userdata.Songs.front()->Beat();
-						userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) + 32 );
+						if( userdata.Songs.size() )
+						{
+							Song *current_song = userdata.Songs.front();
+							int beat = current_song->Beat();
+							current_song->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) + 32 );
+						}
 					}
 					else if( key == SDLK_SLASH )
 					{
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale = 1.;
-						printf( "Pitch/BPM: Match Source\n" );
+						if( userdata.Songs.size() )
+						{
+							userdata.BPM = userdata.Songs.front()->BPM;
+							snprintf( visualizer_message, 128, "Pitch/BPM: Match Source (%.1f BPM)\n", userdata.BPM );
+						}
+						else
+							snprintf( visualizer_message, 128, "Pitch/BPM: Match Source\n" );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_v )
@@ -1664,6 +1819,12 @@ int main( int argc, char **argv )
 			colors[ 2 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 );
 			Uint32* pixels = (Uint32*) screen->pixels;
 			SDL_LockSurface( screen );
+			font1.SetTarget( (uint32_t*) screen->pixels, screen->w, screen->h );
+			font2.SetTarget( (uint32_t*) screen->pixels, screen->w, screen->h );
+			
+			#define FADE_R(r,g,b) (std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ))
+			#define FADE_G(r,g,b) (std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ))
+			#define FADE_B(r,g,b) (std::min<int>( 0xFF, b * 0.9375f ))
 			
 			if( (visualizer_backgrounds[ visualizer ] == 0) || ! userdata.Playing )
 			{
@@ -1674,7 +1835,7 @@ int main( int argc, char **argv )
 					{
 						Uint8 r = 0x00, g = 0x00, b = 0x00;
 						SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
+						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 					}
 				}
 			}
@@ -1692,10 +1853,10 @@ int main( int argc, char **argv )
 						r = std::max<Uint8>( r1, r2 );
 						g = std::max<Uint8>( g1, g2 );
 						b = std::max<Uint8>( b1, b2 );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
+						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 					}
 					SDL_GetRGB( pixels[ x ], screen->format, &r, &g, &b );
-					pixels[ x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
+					pixels[ x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 				}
 			}
 			else if( visualizer_backgrounds[ visualizer ] == 2 )
@@ -1725,7 +1886,7 @@ int main( int argc, char **argv )
 							r = std::max<Uint8>( r1, r2 );
 							g = std::max<Uint8>( g1, g2 );
 							b = std::max<Uint8>( b1, b2 );
-							pixels[ y1 * screen->w + x1 ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
+							pixels[ y1 * screen->w + x1 ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 						}
 					}
 				}
@@ -1747,10 +1908,10 @@ int main( int argc, char **argv )
 							SDL_GetRGB( pixels[ y * screen->w + (x+1) ], screen->format, &r3, &g3, &b3 );
 						else
 							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
-						r = std::max<Uint8>( std::max<Uint8>( r1, r2 ), r3 );
-						g = std::max<Uint8>( std::max<Uint8>( g1, g2 ), g3 );
-						b = std::max<Uint8>( std::max<Uint8>( b1, b2 ), b3 );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
+						r = std::max<Uint8>( std::max<Uint8>( FADE_R(r1,g1,b1), r2 ), FADE_R(r3,g3,b3) );
+						g = std::max<Uint8>( std::max<Uint8>( FADE_G(r1,g1,b1), g2 ), FADE_G(r3,g3,b3) );
+						b = std::max<Uint8>( std::max<Uint8>( FADE_B(r1,g1,b1), b2 ), FADE_B(r3,g3,b3) );
+						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, r, g, b );
 					}
 				}
 				for( int x = 0; x < screen->w; x ++ )
@@ -1768,7 +1929,7 @@ int main( int argc, char **argv )
 						r = std::max<Uint8>( std::max<Uint8>( r1, r2 ), r3 );
 						g = std::max<Uint8>( std::max<Uint8>( g1, g2 ), g3 );
 						b = std::max<Uint8>( std::max<Uint8>( b1, b2 ), b3 );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ), std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ), std::min<int>( 0xFF, b * 0.9375f ) );
+						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 					}
 				}
 			}
@@ -1938,6 +2099,23 @@ int main( int argc, char **argv )
 				}
 				visualizer_fft_height_offset = offset;
 			}
+			
+			font1.Color = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+			font2.Color = font1.Color;
+			if( ! userdata.Crossfading )
+			{
+				font2.Draw( 2, 2, userdata.Title );
+				font1.Draw( 2, 2 + font2.CharH, userdata.Artist );
+				int x_offset = font1.CharW * strlen(userdata.Artist);
+				if( x_offset && userdata.Album[ 0 ] )
+				{
+					font1.Draw( 2 + x_offset, 2 + font2.CharH, " - " );
+					x_offset += 3 * font1.CharW;
+				}
+				font1.Draw( 2 + x_offset, 2 + font2.CharH, userdata.Album );
+			}
+			if( time(NULL) <= userdata.MessageUntil )
+				font2.Draw( 2, screen->h - font2.CharH, userdata.Message );
 			
 			SDL_UnlockSurface( screen );
 			SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );

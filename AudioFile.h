@@ -9,6 +9,8 @@ extern "C" {
 #include <libavresample/avresample.h>
 }
 #include "Mutex.h"
+#include <map>
+#include <string>
 
 class AudioFile
 {
@@ -16,6 +18,7 @@ public:
 	uint8_t *Data;
 	size_t Allocated, Size;
 	size_t Channels, SampleRate, BytesPerSample;
+	std::map<std::string,std::string> Tags;
 	
 	static Mutex GlobalLock;
 	

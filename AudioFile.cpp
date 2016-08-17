@@ -42,6 +42,8 @@ void AudioFile::Clear( void )
 	decoded = 0;
 	got_frame = 0;
 	avr = NULL;
+	
+	Tags.clear();
 }
 
 
@@ -97,6 +99,8 @@ bool AudioFile::Load( const char *filename, bool lock )
 {
 	if( lock )
 		GlobalLock.Lock();
+	
+	AVDictionaryEntry *tag = NULL;
 	
 	// open input file, and allocate format context
 	if( avformat_open_input( &fmt_ctx, filename, NULL, NULL ) < 0 )
@@ -175,6 +179,10 @@ bool AudioFile::Load( const char *filename, bool lock )
 	
 	if( ! avr )
 		BytesPerSample = av_get_bytes_per_sample( audio_dec_ctx->sample_fmt );
+	
+	// Get metadata tags.
+	while(( tag = av_dict_get( fmt_ctx->metadata, "", tag, AV_DICT_IGNORE_SUFFIX ) ))
+		Tags[ tag->key ] = tag->value;
 	
 end:
 	if( audio_dec_ctx )

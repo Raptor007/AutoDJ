@@ -304,6 +304,25 @@ public:
 		return 1. / VolumeMax;
 	}
 	
+	void SetIntroOutroBeats( void )
+	{
+		if( TotalBeats() < 128. )
+		{
+			IntroBeats = 32;
+			OutroBeats = 32;
+		}
+		else if( TotalBeats() < 256. )
+		{
+			IntroBeats = 64;
+			OutroBeats = 64;
+		}
+		else
+		{
+			IntroBeats = 96;
+			OutroBeats = 128;
+		}
+	}
+	
 	void Analyze( size_t first_frame = 0 )
 	{
 		if( !( Audio.Data && Audio.Size ) )
@@ -639,12 +658,14 @@ public:
 			BPM += bpm_fpart;
 		
 		// Sanity-check the BPM, and scale it to the expected range.
-		if( BPM < 80. )
+		if( BPM < 90. )
 			BPM *= 2.;
-		else if( BPM > 160. )
+		else if( BPM > 180. )
 			BPM /= 2.;
 		
 		FirstBeatFrame = best_first_beat;
+		
+		SetIntroOutroBeats();
 	}
 };
 
@@ -712,6 +733,8 @@ public:
 	bool VolumeMatching;
 	bool PreventClipping;
 	bool Repeat;
+	bool Shuffle;
+	size_t ShuffleDelay;
 	bool Metronome;
 	PlaybackBuffer Buffer;
 	FILE *WriteTo;
@@ -743,6 +766,8 @@ public:
 		VolumeMatching = true;
 		PreventClipping = false;
 		Repeat = true;
+		Shuffle = true;
+		ShuffleDelay = 0;
 		Metronome = false;
 		Buffer.SetSize( 131072 );
 		WriteTo = NULL;
@@ -818,6 +843,20 @@ public:
 					{
 						Playing = true;
 						changed_song = true;
+					}
+				}
+				
+				// If shuffle is enabled, shuffle the queue once per loop through.
+				if( Shuffle && Queue.size() && (Songs.size() < 3) )
+				{
+					if( ShuffleDelay )
+						ShuffleDelay --;
+					else
+					{
+						size_t dont_shuffle_end = std::min<size_t>( Queue.size(), Songs.size() );
+						std::random_shuffle( Queue.begin(), Queue.end() - dont_shuffle_end );
+						ShuffleDelay = Queue.size() - dont_shuffle_end - 1;
+						printf( "Shuffling next %i songs.\n", (int) ShuffleDelay + 1 );
 					}
 				}
 				
@@ -1284,7 +1323,6 @@ int main( int argc, char **argv )
 {
 	std::vector<const char*> paths;
 	UserData userdata;
-	bool shuffle = true;
 	bool window = true;
 	bool fullscreen = false;
 	int visualizer = 1;
@@ -1324,7 +1362,7 @@ int main( int argc, char **argv )
 			else if( strncasecmp( argv[ i ], "--visualizer=", strlen("--visualizer=") ) == 0 )
 				visualizer = atoi( argv[ i ] + strlen("--visualizer=") );
 			else if( strcasecmp( argv[ i ], "--no-shuffle" ) == 0 )
-				shuffle = false;
+				userdata.Shuffle = false;
 			else if( strcasecmp( argv[ i ], "--no-repeat" ) == 0 )
 				userdata.Repeat = false;
 			else if( strcasecmp( argv[ i ], "--metronome" ) == 0 )
@@ -1358,6 +1396,14 @@ int main( int argc, char **argv )
 				userdata.Buffer.SetSize( atoi( argv[ i ] + strlen("--buffer2=") ) * 2 * want.channels );
 			else if( strcasecmp( argv[ i ], "--no-playback" ) == 0 )
 				playback = false;
+			else if( strcasecmp( argv[ i ], "--compile" ) == 0 )
+			{
+				playback = false;
+				userdata.Buffer.SetSize( 0 );
+				window = false;
+				userdata.Repeat = false;
+				userdata.Shuffle = false;
+			}
 			else if( strncasecmp( argv[ i ], "--write=", strlen("--write=") ) == 0 )
 				write = argv[ i ] + strlen("--write=");
 			else
@@ -1425,10 +1471,6 @@ int main( int argc, char **argv )
 	// Prepare audio file input.
 	av_log_set_level( AV_LOG_FATAL );
 	av_register_all();
-	
-	// Shuffle song list if requested.
-	if( shuffle )
-		std::random_shuffle( userdata.Queue.begin(), userdata.Queue.end() );
 	
 	// Prepare audio output.
 	userdata.Buffer.Callback = AudioCallback;
@@ -1614,7 +1656,7 @@ int main( int argc, char **argv )
 							Song *current_song = userdata.Songs.front();
 							current_song->CurrentFrame = 0.;
 							current_song->FirstOutroFrame = 0.;
-							current_song->OutroBeats = 128;
+							current_song->SetIntroOutroBeats();
 						}
 					}
 					else if( key == SDLK_RIGHTBRACKET || key == SDLK_RIGHT )
@@ -1693,8 +1735,7 @@ int main( int argc, char **argv )
 						if( userdata.Songs.size() )
 						{
 							Song *current_song = userdata.Songs.front();
-							int beat = current_song->Beat();
-							current_song->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) - 32 );
+							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() - 32. );
 							if( current_song->CurrentFrame < 0. )
 								current_song->CurrentFrame = 0.;
 						}
@@ -1704,8 +1745,7 @@ int main( int argc, char **argv )
 						if( userdata.Songs.size() )
 						{
 							Song *current_song = userdata.Songs.front();
-							int beat = current_song->Beat();
-							current_song->CurrentFrame = userdata.Songs.front()->FrameAtBeat( beat - (beat % 16) + 32 );
+							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() + 32. );
 						}
 					}
 					else if( key == SDLK_SLASH )
@@ -2121,12 +2161,11 @@ int main( int argc, char **argv )
 			SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
 		}
 		
-		// If we're not playing back audio, advance by 1024 bytes.
-		// This is mostly for valgrind debugging to avoid alsa buffer underrun warnings.
-		if(unlikely( ! playback ))
+		// If we're not playing back audio and the songs are ready, advance by 1MB.
+		if( unlikely( ! playback ) && ( (userdata.Songs.size() >= 2) || (userdata.Loader.Finished && userdata.Queue.empty()) ) )
 		{
-			Uint8 buffer[ 1024 ];
-			want.callback( (void*) &userdata, buffer, 1024 );
+			Uint8 buffer[ 1024*1024 ];
+			want.callback( (void*) &userdata, buffer, 1024*1024 );
 		}
 #ifdef WAVEOUT
 		else if( ! sdl_audio )

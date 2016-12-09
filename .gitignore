@@ -12,4 +12,6 @@
 *.res
 *.app
 *.dSYM
+*.dll
 AutoDJ
+AutoDJ.exe

@@ -28,6 +28,9 @@ extern "C" {
 
 class Song;
 class SongLoader;
+class EqualizerParam;
+class EqualizerFFT;
+class Equalizer;
 class UserData;
 
 namespace ResampleMethod
@@ -41,6 +44,7 @@ namespace ResampleMethod
 }
 
 #define VISUALIZERS            5
+#define VISUALIZER_COLORS      8
 #define VISUALIZER_BACKGROUNDS 4
 
 int SongLoaderThread( void *data_ptr );
@@ -718,6 +722,127 @@ public:
 // --------------------------------------------------------------------------------------
 
 
+class EqualizerParam
+{
+public:
+	std::map<double,double> FreqScale;
+	EqualizerParam( void ){}
+	~EqualizerParam(){}
+	
+	double GetScale( size_t index, size_t frames, unsigned int rate )
+	{
+		double freq = ((double) index) * rate / frames;
+		std::map<double,double>::const_iterator found = FreqScale.lower_bound( freq );
+		
+		// If it's higher than our highest specified, use the highest.
+		if( found == FreqScale.end() )
+			return FreqScale.size() ? FreqScale.rbegin()->second : 1.;
+		
+		// If it's less than or equal to our lowest specified, use the lowest.
+		if( found == FreqScale.begin() )
+			return found->second;
+		
+		std::map<double,double>::const_iterator prev = found;
+		prev --;
+		
+		// Interpolate linearly between nearest freqency volume scales.
+		double b_part = (freq - prev->first) / (found->first - prev->first);
+		return prev->second * (1. - b_part) + found->second * b_part;
+	}
+	
+	double MaxScale( void )
+	{
+		if( ! FreqScale.size() )
+			return 1.;
+		
+		double max = 0.;
+		for( std::map<double,double>::const_iterator iter = FreqScale.begin(); iter != FreqScale.end(); iter ++ )
+		{
+			if( iter->second > max )
+				max = iter->second;
+		}
+		return max;
+	}
+};
+
+
+class EqualizerFFT
+{
+public:
+	size_t Frames;
+	FFTContext *Context1, *Context2;
+	FFTComplex *Complex;
+	
+	EqualizerFFT( size_t frames )
+	{
+		Frames = frames;
+		Context1 = av_fft_init( log2(Frames), false );
+		Context2 = av_fft_init( log2(Frames), true );
+		Complex = (FFTComplex*) av_mallocz( Frames * sizeof(FFTComplex) );
+	}
+	
+	~EqualizerFFT(){}
+	
+	void Process( Sint16* buffer, unsigned int channels, unsigned int rate, EqualizerParam *param, double max = 0. )
+	{
+		// If clipping prevention is enabled, scale down if needed.
+		double pre_eq = 1.;
+		if( max )
+		{
+			double highest = param->MaxScale();
+			if( highest > max )
+				pre_eq = max / highest;
+		}
+		
+		for( size_t ch = 0; ch < channels; ch ++ )
+		{
+			memset( Complex, 0, Frames * sizeof(FFTComplex) );
+			for( size_t i = 0; i < Frames; i ++ )
+				Complex[ i ].re = buffer[ (i * channels) + ch ] / 32768.f;
+			av_fft_permute( Context1, Complex );
+			av_fft_calc( Context1, Complex );
+			
+			for( size_t i = 0; i < Frames; i ++ )
+			{
+				double scale = param->GetScale( i, Frames, rate ) * pre_eq;
+				Complex[ i ].re *= scale;
+				Complex[ i ].im *= scale;
+			}
+			
+			av_fft_permute( Context2, Complex );
+			av_fft_calc( Context2, Complex );
+			for( size_t i = 0; i < Frames; i ++ )
+				buffer[ (i * channels) + ch ] = Finalize( Complex[ i ].re * 8. );
+		}
+	}
+};
+
+
+class Equalizer
+{
+private:
+	std::map<size_t,EqualizerFFT*> EqualizerFFTs;
+
+public:
+	Equalizer( void ){}
+	~Equalizer(){}
+	
+	void Process( Sint16* buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param, double max = 0. )
+	{
+		if( EqualizerFFTs.find(frames) == EqualizerFFTs.end() )
+			EqualizerFFTs[ frames ] = new EqualizerFFT(frames);
+		
+		EqualizerFFTs[ frames ]->Process( buffer, channels, rate, param, max );
+	}
+};
+
+
+Equalizer GlobalEQ;
+
+
+// --------------------------------------------------------------------------------------
+
+
 class UserData
 {
 public:
@@ -751,6 +876,7 @@ public:
 	char Album[ 128 ];
 	char Message[ 128 ];
 	time_t MessageUntil;
+	EqualizerParam *EQ;
 	
 	UserData( void )
 	{
@@ -782,6 +908,7 @@ public:
 		memset( Album, 0, 128 );
 		memset( Message, 0, 128 );
 		MessageUntil = time(NULL) - 1;
+		EQ = NULL;
 	}
 	
 	void SetMessage( const char *message, int seconds )
@@ -1038,6 +1165,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	double crossfade_at_beat = 0.;
 	bool crossfade_now = false;
 	double crossfade = 0.;
+	double volume = 1.;
+	double volume_next = 1.;
 	
 	size_t songs_size = ud->Songs.size();
 	if( songs_size )
@@ -1047,8 +1176,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		
 		double bpm = ud->SourceBPM ? (current_song->BPM * ud->SourcePitchScale) : ud->BPM;
 		
-		double volume = ud->VolumeMatching ? ud->Volume * current_song->VolumeAdjustment() : ud->Volume;
-		double volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
+		volume = ud->VolumeMatching ? ud->Volume * current_song->VolumeAdjustment() : ud->Volume;
+		volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
 		if( ud->PreventClipping )
 		{
 			volume = std::min<double>( current_song->VolumeAdjustmentToMax(), volume );
@@ -1132,6 +1261,11 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 					current_song = next_song;
 					next_song = (songs_size >= 3) ? ud->Songs.at( 2 ) : NULL;
 					
+					volume = volume_next;
+					volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
+					if( ud->PreventClipping && next_song )
+						volume_next = std::min<double>( next_song->VolumeAdjustmentToMax(), volume_next );
+					
 					calculated_crossfade = false;
 					crossfade_now = false;
 					crossfade = 0.;
@@ -1171,6 +1305,19 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			fwrite( stream, 1, len, ud->WriteTo );
 			ud->WroteBytes += len;
 		}
+	}
+	
+	// Apply equalizer.
+	if( ud->EQ )
+	{
+		double max = 0.;
+		if( ud->PreventClipping )
+		{
+			double vol = volume * (1. - crossfade) + volume_next * crossfade;
+			max = vol ? 1. / vol : 0.;
+		}
+		
+		GlobalEQ.Process( (Sint16*) stream, ud->Spec.channels, ud->Spec.freq, len / (2 * ud->Spec.channels), ud->EQ, max );
 	}
 	
 	// Remove tracks that have finished playing.
@@ -1325,7 +1472,7 @@ int main( int argc, char **argv )
 	UserData userdata;
 	bool window = true;
 	bool fullscreen = false;
-	int visualizer = 1;
+	int visualizer = 2;
 	bool playback = true;
 	bool sdl_audio = true;
 #ifdef WAVEOUT
@@ -1386,6 +1533,26 @@ int main( int argc, char **argv )
 				userdata.VolumeMatching = false;
 			else if( strcasecmp( argv[ i ], "--prevent-clipping" ) == 0 )
 				userdata.PreventClipping = true;
+			else if( strncasecmp( argv[ i ], "--eq=", strlen("--eq=") ) == 0 )
+			{
+				userdata.EQ = new EqualizerParam();
+				const char *eq = argv[ i ] + strlen("--eq=");
+				while( eq && eq[ 0 ] )
+				{
+					double freq = atof( eq );
+					const char *colon = strchr( eq, ':' );
+					if( colon )
+					{
+						const char *db = colon + 1;
+						if( db[ 0 ] == '+' )
+							db ++;
+						userdata.EQ->FreqScale[ freq ] = pow( 2., atof(db) / 6. );
+					}
+					eq = strchr( eq, ',' );
+					if( eq )
+						eq ++;
+				}
+			}
 			else if( strncasecmp( argv[ i ], "--rate=", strlen("--rate=") ) == 0 )
 				want.freq = atoi( argv[ i ] + strlen("--rate=") );
 			else if( strncasecmp( argv[ i ], "--channels=", strlen("--channels=") ) == 0 )
@@ -1556,11 +1723,23 @@ int main( int argc, char **argv )
 		fflush( userdata.WriteTo );
 	}
 	
+	// Keep track of equalizer parameters for toggling.
+	EqualizerParam *disabled_eq = userdata.EQ;
+	if( ! disabled_eq )
+	{
+		// Default EQ if user didn't specify.
+		disabled_eq = new EqualizerParam();
+		disabled_eq->FreqScale[   0. ] = 1.;
+		disabled_eq->FreqScale[  10. ] = 3.;
+		disabled_eq->FreqScale[  30. ] = 4.;
+		disabled_eq->FreqScale[ 120. ] = 1.;
+	}
+	
 	// Visualizer variables.
 	clock_t visualizer_updated_clock = 0, visualizer_prev_clock = 0;
 	size_t visualizer_start_sample = 0;
 	size_t visualizer_loading_frame = 0;
-	int visualizer_color1 = 1, visualizer_color2 = 0;
+	int visualizer_color1 = 6, visualizer_color2 = 4, visualizer_text_color = 0;
 	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 2, 3, 3, 1 };
 	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * 2);
 	int visualizer_fft_frames = visualizer_frames / 4;
@@ -1792,14 +1971,22 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_c )
 					{
-						int visualizer_colors = visualizer_color1 * 3 + visualizer_color2;
+						int visualizer_colors = visualizer_color1 * VISUALIZER_COLORS + (visualizer_color2 - visualizer_color1 + VISUALIZER_COLORS) % VISUALIZER_COLORS;
 						if( ! shift )
 							visualizer_colors ++;
 						else
-							visualizer_colors += 8;
-						visualizer_colors %= 9;
-						visualizer_color1 = visualizer_colors / 3;
-						visualizer_color2 = visualizer_colors % 3;
+							visualizer_colors += VISUALIZER_COLORS * VISUALIZER_COLORS - 1;
+						visualizer_colors %= VISUALIZER_COLORS * VISUALIZER_COLORS;
+						visualizer_color1 = visualizer_colors / VISUALIZER_COLORS;
+						visualizer_color2 = (visualizer_color1 + visualizer_colors % VISUALIZER_COLORS) % VISUALIZER_COLORS;
+					}
+					else if( key == SDLK_f )
+					{
+						if( ! shift )
+							visualizer_text_color ++;
+						else
+							visualizer_text_color += VISUALIZER_COLORS - 1;
+						visualizer_text_color %= VISUALIZER_COLORS;
 					}
 					else if( key == SDLK_b )
 					{
@@ -1811,6 +1998,21 @@ int main( int argc, char **argv )
 								visualizer_backgrounds[ visualizer ] += VISUALIZER_BACKGROUNDS - 1;
 							visualizer_backgrounds[ visualizer ] %= VISUALIZER_BACKGROUNDS;
 						}
+					}
+					else if( key == SDLK_e )
+					{
+						if( userdata.EQ )
+						{
+							disabled_eq = userdata.EQ;
+							userdata.EQ = NULL;
+						}
+						else
+							userdata.EQ = disabled_eq;
+						
+						snprintf( visualizer_message, 128, "Equalizer: %s\n", userdata.EQ ? "On" : "Off" );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
 					}
 				}
 			}
@@ -1853,10 +2055,15 @@ int main( int argc, char **argv )
 				visualizer_prev_clock = clock();
 			}
 			
-			Uint32 colors[ 3 ];
-			colors[ 0 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
-			colors[ 1 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 );
-			colors[ 2 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 );
+			Uint32 colors[ VISUALIZER_COLORS ];
+			colors[ 0 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF ); // White to Blue
+			colors[ 1 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0xFF ); // Cyan to Blue
+			colors[ 2 ] = SDL_MapRGB( screen->format, 0x00, 0x00, 0xFF ); // Blue
+			colors[ 3 ] = SDL_MapRGB( screen->format, 0xFF, 0x00, 0xFF ); // Magenta to Blue
+			colors[ 4 ] = SDL_MapRGB( screen->format, 0xFF, 0x00, 0x00 ); // Red
+			colors[ 5 ] = SDL_MapRGB( screen->format, 0xFF, 0x80, 0x00 ); // Orange to Red
+			colors[ 6 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 ); // Yellow to Red
+			colors[ 7 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 ); // Green
 			Uint32* pixels = (Uint32*) screen->pixels;
 			SDL_LockSurface( screen );
 			font1.SetTarget( (uint32_t*) screen->pixels, screen->w, screen->h );
@@ -2038,7 +2245,7 @@ int main( int argc, char **argv )
 						amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
 						int h = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * amplitude ) );
 						for( int y = screen->h - 1 - h; y < screen->h; y ++ )
-							pixels[ y * screen->w + x ] = (ch % 2) ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
+							pixels[ y * screen->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 					}
 					visualizer_fft_width_offset = offset;
 				}
@@ -2049,7 +2256,7 @@ int main( int argc, char **argv )
 				// Show left/right spectrum of frequencies.
 				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
 				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (screen->h + visualizer_fft_height_offset) );
-				for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
+				for( int ch = (userdata.Spec.channels > 1) ? 1 : 0; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
@@ -2058,31 +2265,48 @@ int main( int argc, char **argv )
 					if( (volume > 0.f) && (volume < 1.f) )
 						scale /= volume;
 					for( int i = 0; i < frames; i ++ )
-						visualizer_fft_complex[ i ].re = ((Sint16*)( userdata.VisualizerBuffer ))[ visualizer_start_sample + (i * userdata.Spec.channels) + ch ] * scale;
+						for( int in_ch = ch; in_ch < userdata.Spec.channels; in_ch += 2 )
+							visualizer_fft_complex[ i ].re += ((Sint16*)( userdata.VisualizerBuffer ))[ visualizer_start_sample + (i * userdata.Spec.channels) + in_ch ] * scale;
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
-					int offset = 0;
-					for( int y = 0; y < screen->h; y ++ )
+				}
+				const FFTComplex *spectrum_l = visualizer_fft_complex_l;
+				const FFTComplex *spectrum_r = (userdata.Spec.channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
+				int offset = 0;
+				for( int y = 0; y < screen->h; y ++ )
+				{
+					int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, y ) );
+					int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, y + 1 ) );
+					if( band_min == band_max )
 					{
-						int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, y ) );
-						int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, y + 1 ) );
-						if( band_min == band_max )
-						{
-							offset ++;
-							band_max ++;
-						}
-						float harmonics = 1.f + log2( (visualizer_fft_frames/2) / band_max );
-						float amplitude = 0.f;
-						for( int band = band_min; band < band_max; band ++ )
-							amplitude += sqrt( visualizer_fft_complex[ band ].re * visualizer_fft_complex[ band ].re + visualizer_fft_complex[ band ].im * visualizer_fft_complex[ band ].im );
-						amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
-						int h = std::max<int>( 0, std::min<int>( screen->w / 2 - 1, screen->w / 2 * amplitude ) );
+						offset ++;
+						band_max ++;
+					}
+					float harmonics = 1.f + log2( (visualizer_fft_frames/2) / band_max );
+					float amplitude_l = 0.f, amplitude_r = 0.f;
+					for( int band = band_min; band < band_max; band ++ )
+					{
+						amplitude_l += sqrt( spectrum_l[ band ].re * spectrum_l[ band ].re + spectrum_l[ band ].im * spectrum_l[ band ].im );
+						amplitude_r += sqrt( spectrum_r[ band ].re * spectrum_r[ band ].re + spectrum_r[ band ].im * spectrum_r[ band ].im );
+					}
+					float amplitude = amplitude_l + amplitude_r;
+					if( ! amplitude )
+						continue;
+					float right_ratio = amplitude_r / amplitude;
+					float separation = fabs( 0.5f - right_ratio ) * 2.f;
+					amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
+					for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
+					{
+						float this_amplitude = (ch % 2) ? amplitude_r : amplitude_l;
+						Uint32 color = (separation * separation * this_amplitude * 2.f > 0.015625f) ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
+						this_amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
+						int h = std::max<int>( 0, std::min<int>( screen->w / 2 - 1, screen->w / 2 * this_amplitude ) );
 						int dx = (ch % 2) ? 1 : -1;
 						for( int x = screen->w / 2 - (ch+1)%2; (ch % 2) ? (x < screen->w / 2 + h) : (x > screen->w / 2 - h); x += dx )
-							pixels[ (screen->h - y - 1) * screen->w + x ] = (ch % 2) ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
+							pixels[ (screen->h - y - 1) * screen->w + x ] = color;
 					}
-					visualizer_fft_height_offset = offset;
 				}
+				visualizer_fft_height_offset = offset;
 			}
 			
 			else if( visualizer == 4 )
@@ -2109,7 +2333,6 @@ int main( int argc, char **argv )
 				int offset = 0;
 				for( int y = 0; y < screen->h; y ++ )
 				{
-					float amplitude_l = 0.f, amplitude_r = 0.f;
 					int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, y ) );
 					int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, y + 1 ) );
 					if( band_min == band_max )
@@ -2118,6 +2341,7 @@ int main( int argc, char **argv )
 						band_max ++;
 					}
 					float harmonics = 1.f + log2( (visualizer_fft_frames/2) / band_max );
+					float amplitude_l = 0.f, amplitude_r = 0.f;
 					for( int band = band_min; band < band_max; band ++ )
 					{
 						amplitude_l += sqrt( spectrum_l[ band ].re * spectrum_l[ band ].re + spectrum_l[ band ].im * spectrum_l[ band ].im );
@@ -2133,29 +2357,42 @@ int main( int argc, char **argv )
 					int c = std::max<int>( 0, std::min<int>( screen->w - 1, screen->w * right_ratio ) );
 					int x_min = std::max<int>( 0, c - w/2 );
 					int x_max = std::min<int>( screen->w - 1, c + w/2 );
-					Uint32 color = (separation * separation * amplitude > 0.015625f) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
+					Uint32 color = (separation * separation * amplitude > 0.015625f) ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
 					for( int x = x_min; x <= x_max; x ++ )
 						pixels[ (screen->h - y - 1) * screen->w + x ] = color;
 				}
 				visualizer_fft_height_offset = offset;
 			}
 			
-			font1.Color = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+			font1.Color = colors[ visualizer_text_color ];
 			font2.Color = font1.Color;
+			uint32_t shadow = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
 			if( ! userdata.Crossfading )
 			{
+				font2.Draw( 2, 3, userdata.Title, shadow );
+				font2.Draw( 3, 3, userdata.Title, shadow );
 				font2.Draw( 2, 2, userdata.Title );
+				font1.Draw( 2, 3 + font2.CharH, userdata.Artist, shadow );
+				font1.Draw( 3, 3 + font2.CharH, userdata.Artist, shadow );
 				font1.Draw( 2, 2 + font2.CharH, userdata.Artist );
 				int x_offset = font1.CharW * strlen(userdata.Artist);
 				if( x_offset && userdata.Album[ 0 ] )
 				{
+					font1.Draw( 2 + x_offset, 3 + font2.CharH, " - ", shadow );
+					font1.Draw( 3 + x_offset, 3 + font2.CharH, " - ", shadow );
 					font1.Draw( 2 + x_offset, 2 + font2.CharH, " - " );
 					x_offset += 3 * font1.CharW;
 				}
+				font1.Draw( 2 + x_offset, 3 + font2.CharH, userdata.Album, shadow );
+				font1.Draw( 3 + x_offset, 3 + font2.CharH, userdata.Album, shadow );
 				font1.Draw( 2 + x_offset, 2 + font2.CharH, userdata.Album );
 			}
 			if( time(NULL) <= userdata.MessageUntil )
+			{
+				font2.Draw( 2, screen->h - font2.CharH + 1, userdata.Message, shadow );
+				font2.Draw( 3, screen->h - font2.CharH + 1, userdata.Message, shadow );
 				font2.Draw( 2, screen->h - font2.CharH, userdata.Message );
+			}
 			
 			SDL_UnlockSurface( screen );
 			SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );

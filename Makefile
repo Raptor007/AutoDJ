@@ -49,7 +49,7 @@ AutoDJ.app: AutoDJ Info.plist
 	rsync -ax AutoDJ.icns $@/Contents/Resources/
 	-cp $(PREFIX)/lib/libgcc/libstdc++.6.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libstdc++.6.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libgcc/libstdc++.6.dylib "@executable_path/libstdc++.6.dylib" $@/Contents/MacOS/AutoDJ
 	-cp $(PREFIX)/lib/libgcc/libgcc_s.1.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libgcc_s.1.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libgcc/libgcc_s.1.dylib "@executable_path/libgcc_s.1.dylib" $@/Contents/MacOS/AutoDJ
-	-codesign -s Raptor007 $@
+	-codesign -s $(shell whoami) $@
 
 AutoDJ.res: AutoDJ.rc
 	windres $< -O coff -o $@

@@ -15,4 +15,5 @@ public:
 	
 	void SetTarget( uint32_t *pixels, unsigned int width, unsigned int height );
 	void Draw( int x, int y, const char *str );
+	void Draw( int x, int y, const char *str, uint32_t color );
 };

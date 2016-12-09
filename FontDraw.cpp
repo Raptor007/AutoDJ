@@ -48,6 +48,11 @@ void FontDraw::SetTarget( uint32_t *pixels, unsigned int width, unsigned int hei
 
 void FontDraw::Draw( int x, int y, const char *str )
 {
+	Draw( x, y, str, Color );
+}
+
+void FontDraw::Draw( int x, int y, const char *str, uint32_t color )
+{
 	int left = x;
 	
 	while( size_t this_char = *((unsigned char*)( str ++ )) )
@@ -73,7 +78,7 @@ void FontDraw::Draw( int x, int y, const char *str )
 					for( size_t cx = 0; cx < CharW; cx ++ )
 					{
 						if( Char[ this_char ][ cy * CharW + cx ] && (x + cx > 0) && (y + cy > 0) && (x + cx < Width) && (y + cy < Height) )
-							Pixels[ (y + cy) * Width + x + cx ] = Color;
+							Pixels[ (y + cy) * Width + x + cx ] = color;
 					}
 				}
 				

@@ -726,12 +726,12 @@ class EqualizerParam
 {
 public:
 	std::map<double,double> FreqScale;
+	
 	EqualizerParam( void ){}
 	~EqualizerParam(){}
 	
-	double GetScale( size_t index, size_t frames, unsigned int rate )
+	double GetScale( double freq )
 	{
-		double freq = ((double) index) * rate / frames;
 		std::map<double,double>::const_iterator found = FreqScale.lower_bound( freq );
 		
 		// If it's higher than our highest specified, use the highest.
@@ -748,6 +748,11 @@ public:
 		// Interpolate linearly between nearest freqency volume scales.
 		double b_part = (freq - prev->first) / (found->first - prev->first);
 		return prev->second * (1. - b_part) + found->second * b_part;
+	}
+	
+	double GetScale( size_t index, size_t frames, unsigned int rate )
+	{
+		return GetScale( ((double) index) * rate / frames );
 	}
 	
 	double MaxScale( void )
@@ -768,13 +773,18 @@ public:
 
 class EqualizerFFT
 {
-public:
-	size_t Frames;
+private:
 	FFTContext *Context1, *Context2;
 	FFTComplex *Complex;
+
+public:
+	unsigned int Channels, Rate;
+	size_t Frames;
 	
-	EqualizerFFT( size_t frames )
+	EqualizerFFT( unsigned int channels, unsigned int rate, size_t frames )
 	{
+		Channels = channels;
+		Rate = rate;
 		Frames = frames;
 		Context1 = av_fft_init( log2(Frames), false );
 		Context2 = av_fft_init( log2(Frames), true );
@@ -783,7 +793,7 @@ public:
 	
 	~EqualizerFFT(){}
 	
-	void Process( Sint16* buffer, unsigned int channels, unsigned int rate, EqualizerParam *param, double max = 0. )
+	void Process( Sint16 *buffer, EqualizerParam *param, double max = 0. )
 	{
 		// If clipping prevention is enabled, scale down if needed.
 		double pre_eq = 1.;
@@ -794,25 +804,40 @@ public:
 				pre_eq = max / highest;
 		}
 		
-		for( size_t ch = 0; ch < channels; ch ++ )
+		for( size_t ch = 0; ch < Channels; ch ++ )
 		{
 			memset( Complex, 0, Frames * sizeof(FFTComplex) );
 			for( size_t i = 0; i < Frames; i ++ )
-				Complex[ i ].re = buffer[ (i * channels) + ch ] / 32768.f;
+				Complex[ i ].re = buffer[ (i * Channels) + ch ] * pre_eq / 32768.f;
 			av_fft_permute( Context1, Complex );
 			av_fft_calc( Context1, Complex );
 			
-			for( size_t i = 0; i < Frames; i ++ )
+			// Apply equalizer to all frequency bins except DC offset.
+			for( size_t i = 1; i < Frames; i ++ )
 			{
-				double scale = param->GetScale( i, Frames, rate ) * pre_eq;
+				double scale = param->GetScale( i, Frames, Rate );
 				Complex[ i ].re *= scale;
 				Complex[ i ].im *= scale;
 			}
 			
 			av_fft_permute( Context2, Complex );
 			av_fft_calc( Context2, Complex );
-			for( size_t i = 0; i < Frames; i ++ )
-				buffer[ (i * channels) + ch ] = Finalize( Complex[ i ].re * 8. );
+			
+			double scale = 32768. / Frames;
+			
+			#define EQ_ANTIPOP 64
+			
+			for( size_t i = EQ_ANTIPOP; i < Frames - EQ_ANTIPOP; i ++ )
+				buffer[ (i * Channels) + ch ] = Finalize( Complex[ i ].re * scale );
+			
+			size_t front_antipop = std::min<size_t>( Frames / 2, EQ_ANTIPOP );
+			for( size_t i = 0; i < front_antipop; i ++ )
+			{
+				double new_part = i / (double) EQ_ANTIPOP;
+				buffer[ (i * Channels) + ch ] = Finalize( new_part * Complex[ i ].re * scale + (1. - new_part) * pre_eq * buffer[ (i * Channels) + ch ] );
+				size_t j = Frames - 1 - i;
+				buffer[ (j * Channels) + ch ] = Finalize( new_part * Complex[ j ].re * scale + (1. - new_part) * pre_eq * buffer[ (j * Channels) + ch ] );
+			}
 		}
 	}
 };
@@ -829,10 +854,25 @@ public:
 	
 	void Process( Sint16* buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param, double max = 0. )
 	{
-		if( EqualizerFFTs.find(frames) == EqualizerFFTs.end() )
-			EqualizerFFTs[ frames ] = new EqualizerFFT(frames);
+		#define EQ_FRAMES 0
 		
-		EqualizerFFTs[ frames ]->Process( buffer, channels, rate, param, max );
+		#if EQ_FRAMES
+		if( frames > EQ_FRAMES )
+		{
+			for( size_t chunk = 0; chunk < (frames / EQ_FRAMES); chunk ++ )
+				Process( (Sint16*) (((char*) buffer) + 2 * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param, max );
+			return;
+		}
+		#endif
+		
+		if( param )
+		{
+			// NOTE: We can do this because our audio output never changes rate/channels.
+			if( EqualizerFFTs.find(frames) == EqualizerFFTs.end() )
+				EqualizerFFTs[ frames ] = new EqualizerFFT( channels, rate, frames );
+			
+			EqualizerFFTs[ frames ]->Process( buffer, param, max );
+		}
 	}
 };
 
@@ -1307,7 +1347,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		}
 	}
 	
-	// Apply equalizer.
+	// Apply equalizer if enabled.
 	if( ud->EQ )
 	{
 		double max = 0.;
@@ -1316,7 +1356,6 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			double vol = volume * (1. - crossfade) + volume_next * crossfade;
 			max = vol ? 1. / vol : 0.;
 		}
-		
 		GlobalEQ.Process( (Sint16*) stream, ud->Spec.channels, ud->Spec.freq, len / (2 * ud->Spec.channels), ud->EQ, max );
 	}
 	
@@ -1727,12 +1766,18 @@ int main( int argc, char **argv )
 	EqualizerParam *disabled_eq = userdata.EQ;
 	if( ! disabled_eq )
 	{
-		// Default EQ if user didn't specify.
+		// Start with a flat 10-band EQ if user didn't specify.
 		disabled_eq = new EqualizerParam();
-		disabled_eq->FreqScale[   0. ] = 1.;
-		disabled_eq->FreqScale[  10. ] = 3.;
-		disabled_eq->FreqScale[  30. ] = 4.;
-		disabled_eq->FreqScale[ 120. ] = 1.;
+		disabled_eq->FreqScale[    32. ] = 1.;
+		disabled_eq->FreqScale[    64. ] = 1.;
+		disabled_eq->FreqScale[   125. ] = 1.;
+		disabled_eq->FreqScale[   250. ] = 1.;
+		disabled_eq->FreqScale[   500. ] = 1.;
+		disabled_eq->FreqScale[  1000. ] = 1.;
+		disabled_eq->FreqScale[  2000. ] = 1.;
+		disabled_eq->FreqScale[  4000. ] = 1.;
+		disabled_eq->FreqScale[  8000. ] = 1.;
+		disabled_eq->FreqScale[ 16000. ] = 1.;
 	}
 	
 	// Visualizer variables.
@@ -1787,14 +1832,6 @@ int main( int argc, char **argv )
 						userdata.Playing = ! userdata.Playing;
 						if( sdl_audio )
 							SDL_PauseAudio( userdata.Playing ? 0 : 1 );
-					}
-					else if( key == SDLK_0 )
-					{
-						userdata.Volume = 1.;
-						snprintf( visualizer_message, 128, "Volume: %.0f%%\n", userdata.Volume * 100. );
-						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_MINUS )
 					{
@@ -2010,6 +2047,146 @@ int main( int argc, char **argv )
 							userdata.EQ = disabled_eq;
 						
 						snprintf( visualizer_message, 128, "Equalizer: %s\n", userdata.EQ ? "On" : "Off" );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_1 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 32. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 32. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 32Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_2 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 64. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 64. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 64Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_3 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 125. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 125. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 125Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_4 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 250. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 250. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 250Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_5 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 500. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 500. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 500Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_6 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 1000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 1000. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 1KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_7 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 2000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 2000. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 2KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_8 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 4000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 4000. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 4KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_9 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 8000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 8000. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 8KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
+					}
+					else if( key == SDLK_0 )
+					{
+						if( ! userdata.EQ )
+							userdata.EQ = disabled_eq;
+						
+						double scale = userdata.EQ->GetScale( 16000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						userdata.EQ->FreqScale[ 16000. ] = scale;
+						double db = 6. * log2(scale);
+						
+						snprintf( visualizer_message, 128, "Equalizer: 16KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );

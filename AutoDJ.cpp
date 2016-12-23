@@ -730,7 +730,7 @@ public:
 	EqualizerParam( void ){}
 	~EqualizerParam(){}
 	
-	double GetScale( double freq )
+	double LookupScale( double freq )
 	{
 		std::map<double,double>::const_iterator found = FreqScale.lower_bound( freq );
 		
@@ -748,6 +748,24 @@ public:
 		// Interpolate linearly between nearest freqency volume scales.
 		double b_part = (freq - prev->first) / (found->first - prev->first);
 		return prev->second * (1. - b_part) + found->second * b_part;
+	}
+	
+	double GetScale( double freq )
+	{
+		#define TRANSITION_AT (20094.)
+		#define TRANSITION_TO (20627.)
+		
+		// Use EQ specifications for audible frequencies.
+		if( freq <= TRANSITION_AT )
+			return LookupScale(freq);
+		
+		// Above the transition band, use 0Hz scale.
+		if( freq >= TRANSITION_TO )
+			return LookupScale(0.);
+		
+		// Within the transition band, interpolate from top EQ scale to 0Hz scale.
+		double end_part = (freq - TRANSITION_AT) / (TRANSITION_TO - TRANSITION_AT);
+		return LookupScale(TRANSITION_AT) * (1. - end_part) + LookupScale(0.) * end_part;
 	}
 	
 	double GetScale( size_t index, size_t frames, unsigned int rate )
@@ -791,7 +809,12 @@ public:
 		Complex = (FFTComplex*) av_mallocz( Frames * sizeof(FFTComplex) );
 	}
 	
-	~EqualizerFFT(){}
+	~EqualizerFFT()
+	{
+		av_fft_end( Context1 );
+		av_fft_end( Context2 );
+		av_free( Complex );
+	}
 	
 	void Process( Sint16 *buffer, EqualizerParam *param, double max = 0. )
 	{
@@ -812,31 +835,40 @@ public:
 			av_fft_permute( Context1, Complex );
 			av_fft_calc( Context1, Complex );
 			
-			// Apply equalizer to all frequency bins except DC offset.
-			for( size_t i = 1; i < Frames; i ++ )
+			// Apply equalizer to all frequency bins, and their negative bins.
+			for( size_t i = 1; i < Frames / 2; i ++ )
 			{
 				double scale = param->GetScale( i, Frames, Rate );
 				Complex[ i ].re *= scale;
 				Complex[ i ].im *= scale;
+				Complex[ Frames - i ].re *= scale;
+				Complex[ Frames - i ].im *= scale;
 			}
+			
+			double scale0 = param->GetScale(0.);
+			Complex[ 0 ].re *= scale0;
+			Complex[ 0 ].im *= scale0;
+			double scaleH = param->GetScale( Frames / 2, Frames, Rate );
+			Complex[ Frames / 2 ].re *= scaleH;
+			Complex[ Frames / 2 ].im *= scaleH;
 			
 			av_fft_permute( Context2, Complex );
 			av_fft_calc( Context2, Complex );
 			
-			double scale = 32768. / Frames;
-			
-			#define EQ_ANTIPOP 64
+			#define EQ_ANTIPOP (Rate / 500)  // 2ms each end = 88 samples each end at 44.1KHz
+			double new_scale = 32768. / Frames;
+			double old_scale = pre_eq * scale0;
 			
 			for( size_t i = EQ_ANTIPOP; i < Frames - EQ_ANTIPOP; i ++ )
-				buffer[ (i * Channels) + ch ] = Finalize( Complex[ i ].re * scale );
+				buffer[ (i * Channels) + ch ] = Finalize( Complex[ i ].re * new_scale );
 			
-			size_t front_antipop = std::min<size_t>( Frames / 2, EQ_ANTIPOP );
-			for( size_t i = 0; i < front_antipop; i ++ )
+			size_t end_antipop = std::min<size_t>( Frames / 2, EQ_ANTIPOP );
+			for( size_t i = 0; i < end_antipop; i ++ )
 			{
 				double new_part = i / (double) EQ_ANTIPOP;
-				buffer[ (i * Channels) + ch ] = Finalize( new_part * Complex[ i ].re * scale + (1. - new_part) * pre_eq * buffer[ (i * Channels) + ch ] );
+				buffer[ (i * Channels) + ch ] = Finalize( new_part * Complex[ i ].re * new_scale + (1. - new_part) * old_scale * buffer[ (i * Channels) + ch ] );
 				size_t j = Frames - 1 - i;
-				buffer[ (j * Channels) + ch ] = Finalize( new_part * Complex[ j ].re * scale + (1. - new_part) * pre_eq * buffer[ (j * Channels) + ch ] );
+				buffer[ (j * Channels) + ch ] = Finalize( new_part * Complex[ j ].re * new_scale + (1. - new_part) * old_scale * buffer[ (j * Channels) + ch ] );
 			}
 		}
 	}
@@ -859,7 +891,7 @@ public:
 		#if EQ_FRAMES
 		if( frames > EQ_FRAMES )
 		{
-			for( size_t chunk = 0; chunk < (frames / EQ_FRAMES); chunk ++ )
+			for( size_t chunk = 0; (chunk + 1) * EQ_FRAMES <= frames; chunk ++ )
 				Process( (Sint16*) (((char*) buffer) + 2 * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param, max );
 			return;
 		}
@@ -2038,15 +2070,38 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_e )
 					{
-						if( userdata.EQ )
+						if( shift )
 						{
-							disabled_eq = userdata.EQ;
-							userdata.EQ = NULL;
+							if( ! userdata.EQ )
+								userdata.EQ = disabled_eq;
+							
+							userdata.EQ->FreqScale.clear();
+							userdata.EQ->FreqScale[    32. ] = 1.;
+							userdata.EQ->FreqScale[    64. ] = 1.;
+							userdata.EQ->FreqScale[   125. ] = 1.;
+							userdata.EQ->FreqScale[   250. ] = 1.;
+							userdata.EQ->FreqScale[   500. ] = 1.;
+							userdata.EQ->FreqScale[  1000. ] = 1.;
+							userdata.EQ->FreqScale[  2000. ] = 1.;
+							userdata.EQ->FreqScale[  4000. ] = 1.;
+							userdata.EQ->FreqScale[  8000. ] = 1.;
+							userdata.EQ->FreqScale[ 16000. ] = 1.;
+							
+							snprintf( visualizer_message, 128, "Equalizer: Flat\n" );
 						}
 						else
-							userdata.EQ = disabled_eq;
+						{
+							if( userdata.EQ )
+							{
+								disabled_eq = userdata.EQ;
+								userdata.EQ = NULL;
+							}
+							else
+								userdata.EQ = disabled_eq;
+							
+							snprintf( visualizer_message, 128, "Equalizer: %s\n", userdata.EQ ? "On" : "Off" );
+						}
 						
-						snprintf( visualizer_message, 128, "Equalizer: %s\n", userdata.EQ ? "On" : "Off" );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );
@@ -2380,6 +2435,8 @@ int main( int argc, char **argv )
 						Sint16 raw = ((Sint16*)( userdata.VisualizerBuffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + ch) % (userdata.VisualizerBufferSize / 2) ];
 						float amplitude = raw / 32767.f;
 						float volume = userdata.Volume;
+						if( userdata.EQ )
+							volume *= std::max<double>( userdata.EQ->GetScale(0.), userdata.EQ->MaxScale() );
 						if( (volume > 0.f) && (volume < 1.f) )
 							amplitude /= volume;
 						int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
@@ -2399,6 +2456,8 @@ int main( int argc, char **argv )
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
 					float scale = 1.f / 32768.f;
 					float volume = userdata.Volume;
+					if( userdata.EQ )
+						volume *= std::max<double>( userdata.EQ->GetScale(0.), userdata.EQ->MaxScale() );
 					if( (volume > 0.f) && (volume < 1.f) )
 						scale /= volume;
 					for( int i = 0; i < frames; i ++ )
@@ -2439,6 +2498,8 @@ int main( int argc, char **argv )
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
 					float scale = 1.f / 32768.f;
 					float volume = userdata.Volume;
+					if( userdata.EQ )
+						volume *= std::max<double>( userdata.EQ->GetScale(0.), userdata.EQ->MaxScale() );
 					if( (volume > 0.f) && (volume < 1.f) )
 						scale /= volume;
 					for( int i = 0; i < frames; i ++ )
@@ -2497,6 +2558,8 @@ int main( int argc, char **argv )
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
 					float scale = 1.f / 32768.f;
 					float volume = userdata.Volume;
+					if( userdata.EQ )
+						volume *= std::max<double>( userdata.EQ->GetScale(0.), userdata.EQ->MaxScale() );
 					if( (volume > 0.f) && (volume < 1.f) )
 						scale /= volume;
 					for( int i = 0; i < frames; i ++ )

@@ -8,7 +8,6 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavresample/avresample.h>
 }
-#include "Mutex.h"
 #include <map>
 #include <string>
 
@@ -20,14 +19,12 @@ public:
 	size_t Channels, SampleRate, BytesPerSample;
 	std::map<std::string,std::string> Tags;
 	
-	static Mutex GlobalLock;
-	
-	AudioFile( const char *filename = NULL, bool lock = false );
+	AudioFile( const char *filename = NULL, volatile bool *running_ptr = NULL );
 	~AudioFile();
 	
 	void Clear( void );
 	bool AddData( uint8_t *add_data, size_t add_size );
-	bool Load( const char *filename, bool lock = false );
+	bool Load( const char *filename, volatile bool *running_ptr );
 
 private:
 	AVFormatContext *fmt_ctx;

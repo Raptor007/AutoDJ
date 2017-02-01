@@ -1,16 +1,13 @@
 #include "AudioFile.h"
 
 
-Mutex AudioFile::GlobalLock;
-
-
-AudioFile::AudioFile( const char *filename, bool lock )
+AudioFile::AudioFile( const char *filename, volatile bool *running_ptr )
 {
 	Data = NULL;
 	Clear();
 	
-	if( filename )
-		Load( filename, lock );
+	if( filename && running_ptr )
+		Load( filename, running_ptr );
 }
 
 
@@ -95,12 +92,12 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 }
 
 
-bool AudioFile::Load( const char *filename, bool lock )
+bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 {
-	if( lock )
-		GlobalLock.Lock();
-	
 	AVDictionaryEntry *tag = NULL;
+	
+	if( ! *running_ptr )
+		goto end;
 	
 	// open input file, and allocate format context
 	if( avformat_open_input( &fmt_ctx, filename, NULL, NULL ) < 0 )
@@ -159,6 +156,9 @@ bool AudioFile::Load( const char *filename, bool lock )
 		}
 		while( pkt.size > 0 );
 		av_packet_unref( &orig_pkt );
+		
+		if( ! *running_ptr )
+			goto end;
 	}
 	
 	// flush cached frames
@@ -167,6 +167,9 @@ bool AudioFile::Load( const char *filename, bool lock )
 	do
 	{
 		DecodePacket();
+		
+		if( ! *running_ptr )
+			goto end;
 	}
 	while( got_frame );
 	
@@ -197,9 +200,6 @@ end:
 		avresample_close( avr );
 		avresample_free( &avr );
 	}
-	
-	if( lock )
-		GlobalLock.Unlock();
 	
 	return audio_stream;
 }

@@ -75,9 +75,9 @@ std::deque<std::string> DirSongs( std::string path );
 #endif
 
 #ifdef WIN32
-#define PATH_SEPARATOR "\\"
+const char *PATH_SEPARATOR = "\\";
 #else
-#define PATH_SEPARATOR "/"
+const char *PATH_SEPARATOR = "/";
 #endif
 
 
@@ -94,8 +94,9 @@ public:
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
 	double VolumeMax, VolumeAverage;
+	volatile bool *RunningPtr;
 	
-	Song( const char *filename )
+	Song( const char *filename, volatile bool *running_ptr )
 	{
 		TotalFrames = 0;
 		BPM = 138.;
@@ -106,8 +107,9 @@ public:
 		OutroBeats = 128;
 		VolumeMax = 1.;
 		VolumeAverage = 0.25;
+		RunningPtr = running_ptr;
 		
-		if( Audio.Load( filename ) )
+		if( Audio.Load( filename, RunningPtr ) )
 		{
 			TotalFrames = Audio.Size / (Audio.BytesPerSample * Audio.Channels);
 			
@@ -308,27 +310,56 @@ public:
 		return 1. / VolumeMax;
 	}
 	
-	void SetIntroOutroBeats( void )
+	void SetIntroOutroBeats( int crossfade_in = -1, int crossfade_out = -1 )
 	{
-		if( TotalBeats() < 128. )
-		{
-			IntroBeats = 32;
-			OutroBeats = 32;
-		}
-		else if( TotalBeats() < 256. )
-		{
-			IntroBeats = 64;
-			OutroBeats = 64;
-		}
+		if( crossfade_in >= 0 )
+			IntroBeats = crossfade_in;
 		else
-		{
 			IntroBeats = 96;
+		
+		if( crossfade_out >= 0 )
+			OutroBeats = crossfade_out;
+		else
 			OutroBeats = 128;
+		
+		double total_beats = TotalBeats();
+		
+		if( total_beats < 8. )
+		{
+			IntroBeats = 0;
+			OutroBeats = 0;
+		}
+		else if( total_beats < 16. )
+		{
+			IntroBeats = std::min<int>( 4, IntroBeats );
+			OutroBeats = std::min<int>( 4, OutroBeats );
+		}
+		else if( total_beats < 32. )
+		{
+			IntroBeats = std::min<int>( 8, IntroBeats );
+			OutroBeats = std::min<int>( 8, OutroBeats );
+		}
+		else if( total_beats < 64. )
+		{
+			IntroBeats = std::min<int>( 16, IntroBeats );
+			OutroBeats = std::min<int>( 16, OutroBeats );
+		}
+		else if( total_beats < 128. )
+		{
+			IntroBeats = std::min<int>( 32, IntroBeats );
+			OutroBeats = std::min<int>( 32, OutroBeats );
+		}
+		else if( total_beats < 256. )
+		{
+			IntroBeats = std::min<int>( 64, IntroBeats );
+			OutroBeats = std::min<int>( 64, OutroBeats );
 		}
 	}
 	
 	void Analyze( size_t first_frame = 0 )
 	{
+		if( ! *RunningPtr )
+			return;
 		if( !( Audio.Data && Audio.Size ) )
 			return;
 		
@@ -368,6 +399,8 @@ public:
 		VolumeAverage /= samples_in_average;
 		
 		SDL_Delay( 1 );
+		if( ! *RunningPtr )
+			return;
 		
 		
 		// Apply low-pass filter and keep track of average peak height over a period of samples.
@@ -384,6 +417,8 @@ public:
 				prev += buffer16[ frame * Audio.Channels + channel ] / (double) Audio.Channels;
 		
 		SDL_Delay( 1 );
+		if( ! *RunningPtr )
+			return;
 		
 		// Process the rest of the audio.
 		for( size_t frame = lpf_samples + first_frame; frame < max_analysis_frame; frame ++ )
@@ -448,6 +483,8 @@ public:
 		}
 		
 		SDL_Delay( 1 );
+		if( ! *RunningPtr )
+			return;
 		
 		
 		// Look for significant increases in peak averages (bass hits).
@@ -490,6 +527,8 @@ public:
 			}
 			
 			SDL_Delay( 1 );
+			if( ! *RunningPtr )
+				return;
 			
 			// No use trying again if we don't have any more low-frequency peaks detected.
 			if( Beats.size() >= avg_peak.size() )
@@ -651,6 +690,8 @@ public:
 			}
 			
 			SDL_Delay( 1 );
+			if( ! *RunningPtr )
+				return;
 		}
 		
 		// If it's close, round to the nearest whole BPM.
@@ -715,6 +756,7 @@ public:
 			SDL_WaitThread( Thread, &unused );
 			Thread = NULL;
 		}
+		Finished = true;
 	}
 };
 
@@ -926,6 +968,8 @@ public:
 	bool SourceBPM;
 	double SourcePitchScale;
 	uint8_t Resample;
+	int CrossfadeIn;
+	int CrossfadeOut;
 	double Volume;
 	bool VolumeMatching;
 	bool PreventClipping;
@@ -960,6 +1004,8 @@ public:
 		SourceBPM = true;
 		SourcePitchScale = 1.;
 		Resample = ResampleMethod::Auto;
+		CrossfadeIn = 96;
+		CrossfadeOut = 128;
 		Volume = 1.;
 		VolumeMatching = true;
 		PreventClipping = false;
@@ -1021,6 +1067,8 @@ public:
 				// Make sure the song loaded okay.
 				if( song )
 				{
+					song->SetIntroOutroBeats( CrossfadeIn, CrossfadeOut );
+					
 					double sec = song->TotalSeconds();
 					int min = ((int) sec ) / 60;
 					sec -= min * 60.;
@@ -1115,7 +1163,7 @@ int SongLoaderThread( void *loader_ptr )
 	{
 		if( ! loader->Finished )
 		{
-			loader->LoadingSong = new Song( loader->Filename.c_str() );
+			loader->LoadingSong = new Song( loader->Filename.c_str(), &(loader->Running) );
 			
 			// Make sure it loaded okay.
 			if( loader->LoadingSong->Audio.Data && loader->LoadingSong->Audio.Size )
@@ -1142,7 +1190,7 @@ int SongLoaderThread( void *loader_ptr )
 		}
 		
 		// The loader can wait 5sec each time.
-		SDL_Delay( 5000 );
+		SDL_Delay( loader->Running ? 5000 : 1 );
 	}
 	
 	return 0;
@@ -1198,6 +1246,12 @@ bool CalculateCrossfade( const Song *current_song, const Song *next_song, double
 	
 	if( current_song->FirstOutroFrame )
 		*crossfade_at_beat = current_song->BeatAtFrame( current_song->FirstOutroFrame );
+	else if( *crossfade_for_beats < 1. )
+	{
+		// No crossfade means don't bother lining up beats.
+		*crossfade_at_beat = current_total_beats - *crossfade_for_beats;
+		return true;
+	}
 	else
 	{
 		// If FirstOutroFrame is not specified, guess a good crossfade point.
@@ -1484,7 +1538,74 @@ std::deque<std::string> DirSongs( std::string path )
 		}
 	}
 	else if( ! error )
-		songs.push_back( path );
+	{
+		const char *path_str = path.c_str();
+		size_t path_len = strlen(path_str);
+		if( (path_len > 4) && (strncasecmp( path_str + strlen(path_str) - 4, ".m3u", 4 ) == 0) )
+		{
+			// Playlist file.
+			
+			FILE *file = fopen( path_str, "rt" );
+			if( file )
+			{
+				std::string dir_path;
+				std::string::size_type last_slash = path.rfind(PATH_SEPARATOR[0]);
+				if( last_slash != std::string::npos )
+					dir_path = path.substr( 0, last_slash ) + std::string(PATH_SEPARATOR);
+				
+				char buffer[ 32768 ] = "";
+				while( ! feof(file) )
+				{
+					buffer[ 0 ] = '\0';
+					fgets( buffer, 32768, file );
+					char *comment = strchr( buffer, '#' );
+					if( comment )
+						comment[ 0 ] = '\0';
+					size_t len = strlen(buffer);
+					if( ! len )
+						continue;
+					if( buffer[ len - 1 ] == '\n' )
+					{
+						buffer[ len - 1 ] = '\0';
+						len --;
+						if( ! len )
+							continue;
+					}
+					if( buffer[ len - 1 ] == '\r' )
+					{
+						buffer[ len - 1 ] = '\0';
+						len --;
+						if( ! len )
+							continue;
+					}
+					
+					// Determine if this playlist item is a relative or absolute path.
+					std::string item_path;
+#ifdef WIN32
+					// Windows paths usually look like "C:\Music" instead of "\Music".
+					const char *colon = strchr( buffer, ':' );
+					const char *slash = strstr( buffer, PATH_SEPARATOR );
+					if( colon && ((colon < slash) || ! slash) )
+						item_path = buffer;
+					else
+#endif
+					if( strncmp( buffer, PATH_SEPARATOR, strlen(PATH_SEPARATOR) ) == 0 )
+						item_path = buffer;
+					else
+						item_path = dir_path + std::string(buffer);
+					
+					std::deque<std::string> subdir_songs = DirSongs( item_path );
+					for( std::deque<std::string>::const_iterator song_iter = subdir_songs.begin(); song_iter != subdir_songs.end(); song_iter ++ )
+						songs.push_back( *song_iter );
+				}
+				
+				fclose( file );
+			}
+		}
+		else
+			// Individual song.
+			songs.push_back( path );
+	}
 	
 	return songs;
 }
@@ -1597,6 +1718,15 @@ int main( int argc, char **argv )
 			{
 				userdata.BPM = atof( argv[ i ] + strlen("--bpm=") );
 				userdata.SourceBPM = false;
+			}
+			else if( strncasecmp( argv[ i ], "--crossfade-in=", strlen("--crossfade-in=") ) == 0 )
+				userdata.CrossfadeIn = atoi( argv[ i ] + strlen("--crossfade-in=") );
+			else if( strncasecmp( argv[ i ], "--crossfade-out=", strlen("--crossfade-out=") ) == 0 )
+				userdata.CrossfadeOut = atoi( argv[ i ] + strlen("--crossfade-out=") );
+			else if( strncasecmp( argv[ i ], "--crossfade=", strlen("--crossfade=") ) == 0 )
+			{
+				userdata.CrossfadeIn = atoi( argv[ i ] + strlen("--crossfade=") );
+				userdata.CrossfadeOut = userdata.CrossfadeIn;
 			}
 			else if( strncasecmp( argv[ i ], "--volume=", strlen("--volume=") ) == 0 )
 				userdata.Volume = atof( argv[ i ] + strlen("--volume=") );
@@ -1826,6 +1956,7 @@ int main( int argc, char **argv )
 	int visualizer_fft_width_offset = 0;
 	int visualizer_fft_height_offset = 0;
 	char visualizer_message[ 128 ] = "";
+	int visualizer_scoot = 0;
 	
 	// Keep running until playback is complete.
 	userdata.Running = (userdata.Queue.size() || userdata.Songs.size());
@@ -1904,7 +2035,7 @@ int main( int argc, char **argv )
 							Song *current_song = userdata.Songs.front();
 							current_song->CurrentFrame = 0.;
 							current_song->FirstOutroFrame = 0.;
-							current_song->SetIntroOutroBeats();
+							current_song->SetIntroOutroBeats( userdata.CrossfadeIn, userdata.CrossfadeOut );
 						}
 					}
 					else if( key == SDLK_RIGHTBRACKET || key == SDLK_RIGHT )
@@ -2262,6 +2393,8 @@ int main( int argc, char **argv )
 		// Visualize the waveform in the window.
 		if( visualizer && screen && (userdata.Playing || userdata.Songs.empty()) )
 		{
+			clock_t now = clock();
+			
 			// Keep the visualizer synchronized with the audio playback.
 			if( userdata.Playing )
 			{
@@ -2269,11 +2402,10 @@ int main( int argc, char **argv )
 				{
 					visualizer_updated_clock = userdata.VisualizerClock;
 					visualizer_start_sample = 0;
-					visualizer_prev_clock = clock();
+					visualizer_prev_clock = now;
 				}
 				else
 				{
-					clock_t now = clock();
 					size_t frames = userdata.Spec.freq * (now - visualizer_prev_clock) / (double) CLOCKS_PER_SEC;
 					visualizer_prev_clock = now;
 					visualizer_start_sample += userdata.Spec.channels * frames;
@@ -2284,7 +2416,7 @@ int main( int argc, char **argv )
 			{
 				visualizer_loading_frame ++;
 				visualizer_loading_frame %= screen->h;
-				visualizer_prev_clock = clock();
+				visualizer_prev_clock = now;
 			}
 			
 			Uint32 colors[ VISUALIZER_COLORS ];
@@ -2607,26 +2739,32 @@ int main( int argc, char **argv )
 			font1.Color = colors[ visualizer_text_color ];
 			font2.Color = font1.Color;
 			uint32_t shadow = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
-			if( ! userdata.Crossfading )
+			
+			if( userdata.Crossfading )
+				visualizer_scoot ++;
+			else
+				visualizer_scoot = 0;
+			int title_scoot = std::max<int>( 0, (visualizer_scoot - 50) / 2 );
+			int artist_scoot = visualizer_scoot / 3;
+			
+			font2.Draw( 2 - title_scoot, 3, userdata.Title, shadow );
+			font2.Draw( 3 - title_scoot, 3, userdata.Title, shadow );
+			font2.Draw( 2 - title_scoot, 2, userdata.Title );
+			font1.Draw( 2 - artist_scoot, 3 + font2.CharH, userdata.Artist, shadow );
+			font1.Draw( 3 - artist_scoot, 3 + font2.CharH, userdata.Artist, shadow );
+			font1.Draw( 2 - artist_scoot, 2 + font2.CharH, userdata.Artist );
+			int x_offset = font1.CharW * strlen(userdata.Artist);
+			if( x_offset && userdata.Album[ 0 ] )
 			{
-				font2.Draw( 2, 3, userdata.Title, shadow );
-				font2.Draw( 3, 3, userdata.Title, shadow );
-				font2.Draw( 2, 2, userdata.Title );
-				font1.Draw( 2, 3 + font2.CharH, userdata.Artist, shadow );
-				font1.Draw( 3, 3 + font2.CharH, userdata.Artist, shadow );
-				font1.Draw( 2, 2 + font2.CharH, userdata.Artist );
-				int x_offset = font1.CharW * strlen(userdata.Artist);
-				if( x_offset && userdata.Album[ 0 ] )
-				{
-					font1.Draw( 2 + x_offset, 3 + font2.CharH, " - ", shadow );
-					font1.Draw( 3 + x_offset, 3 + font2.CharH, " - ", shadow );
-					font1.Draw( 2 + x_offset, 2 + font2.CharH, " - " );
-					x_offset += 3 * font1.CharW;
-				}
-				font1.Draw( 2 + x_offset, 3 + font2.CharH, userdata.Album, shadow );
-				font1.Draw( 3 + x_offset, 3 + font2.CharH, userdata.Album, shadow );
-				font1.Draw( 2 + x_offset, 2 + font2.CharH, userdata.Album );
+				font1.Draw( 2 - artist_scoot + x_offset, 3 + font2.CharH, " - ", shadow );
+				font1.Draw( 3 - artist_scoot + x_offset, 3 + font2.CharH, " - ", shadow );
+				font1.Draw( 2 - artist_scoot + x_offset, 2 + font2.CharH, " - " );
+				x_offset += 3 * font1.CharW;
 			}
+			font1.Draw( 2 - artist_scoot + x_offset, 3 + font2.CharH, userdata.Album, shadow );
+			font1.Draw( 3 - artist_scoot + x_offset, 3 + font2.CharH, userdata.Album, shadow );
+			font1.Draw( 2 - artist_scoot + x_offset, 2 + font2.CharH, userdata.Album );
+			
 			if( time(NULL) <= userdata.MessageUntil )
 			{
 				font2.Draw( 2, screen->h - font2.CharH + 1, userdata.Message, shadow );
@@ -2679,8 +2817,17 @@ int main( int argc, char **argv )
 	if( ! userdata.Loader.Finished )
 	{
 		printf( "Waiting for loader thread...\n" );
+		size_t wait_count = 0;
 		while( ! userdata.Loader.Finished )
-			SDL_Delay( 100 );
+		{
+			if( wait_count >= 10 )
+			{
+				printf( "Loader thread took too long!  Giving up on it...\n" );
+				break;
+			}
+			SDL_Delay( 1000 );
+			wait_count ++;
+		}
 	}
 	userdata.Queue.clear();
 	while( userdata.Songs.size() )

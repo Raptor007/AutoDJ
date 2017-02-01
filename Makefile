@@ -1,9 +1,9 @@
 PREFIX = /usr
 CC = $(PREFIX)/bin/g++
 O = 2
-CFLAGS = -O$(O) -march=native -mfpmath=sse -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing
+CFLAGS = -O$(O) -march=native -mfpmath=sse -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing -Wno-deprecated-declarations
 INC = $(PREFIX)/include $(PREFIX)/include/SDL
-LIB = libSDLmain.a libSDL.so ../local/lib/libavdevice.a ../local/lib/libavformat.a ../local/lib/libavfilter.a ../local/lib/libavcodec.a ../local/lib/libavresample.a ../local/lib/libswscale.a ../local/lib/libavutil.a ../local/lib/libswresample.a liblzma.so libbz2.a libz.a
+LIB = libSDLmain.a libSDL.so ../local/lib/libavdevice.a ../local/lib/libavformat.a ../local/lib/libavfilter.a ../local/lib/libavcodec.a ../local/lib/libavresample.a ../local/lib/libswscale.a ../local/lib/libavutil.a ../local/lib/libswresample.a libdl.so liblzma.so libbz2.a libz.a
 LIBDIR = $(PREFIX)/lib
 ifeq ($(shell uname -m), x86_64)
 LIBDIR = $(PREFIX)/lib64
@@ -18,7 +18,7 @@ UNAME = $(shell uname)
 ifeq ($(UNAME), Darwin)
 PREFIX = /opt/local
 LIBDIR = $(PREFIX)/lib
-LIB = libSDLmain.a libSDL.a libavdevice.a libavformat.a libavfilter.a libavcodec.a libavresample.a libswscale.a libavutil.a libswresample.a libbluray.a libfreetype.a libpng.a libxml2.a libiconv.a libfaac.a libfdk-aac.a libmp3lame.a libopenjpeg.a libopus.a libschroedinger-1.0.a libtheoradec.a libtheora.a libvorbisenc.a libvorbis.a libvpx.a libx264.a libxvidcore.a libgmp.a libspeex.a libmodplug.dylib libflac.a libvorbisfile.a libvorbis.a libogg.a libXrandr.a libXrender.a libXext.a libX11.a libxcb.a libXdmcp.a libXau.a libbz2.a liblzma.a libz.a liborc-0.4.0.dylib libgnutls.dylib
+LIB = libSDLmain.a libSDL.a libavdevice.a libavformat.a libavfilter.a libavcodec.a libavresample.a libswscale.a libavutil.a libswresample.a libbluray.a libfreetype.a libpng.a libxml2.a libiconv.a libfaac.a libfdk-aac.a libmp3lame.a libopus.a libschroedinger-1.0.a libtheoradec.a libtheora.a libvorbisenc.a libvorbis.a libvpx.a libx264.a libxvidcore.a libgmp.a libspeex.a libmodplug.dylib libflac.a libvorbisfile.a libvorbis.a libogg.a libXrandr.a libXrender.a libXext.a libX11.a libxcb.a libXdmcp.a libXau.a libbz2.a liblzma.a libz.a libopenjp2.dylib libsoxr.dylib liborc-0.4.0.dylib libgnutls.dylib
 FW = Cocoa VideoDecodeAcceleration OpenGL CoreVideo CoreFoundation AudioUnit AudioToolbox IOKit Carbon
 ARCH = i386
 CFLAGS += $(foreach arch,$(ARCH),-arch $(arch))

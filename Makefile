@@ -18,12 +18,22 @@ UNAME = $(shell uname)
 ifeq ($(UNAME), Darwin)
 PREFIX = /opt/local
 LIBDIR = $(PREFIX)/lib
-LIB = libSDLmain.a libSDL.a libavdevice.a libavformat.a libavfilter.a libavcodec.a libavresample.a libswscale.a libavutil.a libswresample.a libbluray.a libfreetype.a libpng.a libxml2.a libiconv.a libfaac.a libfdk-aac.a libmp3lame.a libopus.a libschroedinger-1.0.a libtheoradec.a libtheora.a libvorbisenc.a libvorbis.a libvpx.a libx264.a libxvidcore.a libgmp.a libspeex.a libmodplug.dylib libflac.a libvorbisfile.a libvorbis.a libogg.a libXrandr.a libXrender.a libXext.a libX11.a libxcb.a libXdmcp.a libXau.a libbz2.a liblzma.a libz.a libopenjp2.dylib libsoxr.dylib liborc-0.4.0.dylib libgnutls.dylib
+LIB = libSDLmain.a libSDL.a libavdevice.a libavformat.a libavfilter.a libavcodec.a libavresample.a libswscale.a libavutil.a libswresample.a libbluray.a libfreetype.a libpng.a libxml2.a libiconv.a libfaac.a libfdk-aac.a libmp3lame.a libopus.a libschroedinger-1.0.a libtheoradec.a libtheora.a libvorbisenc.a libvorbis.a libvpx.a libx264.a libx265.a libxvidcore.a libgmp.a libspeex.a libmodplug.dylib libflac.a libvorbisfile.a libvorbis.a libogg.a libXrandr.a libXrender.a libXext.a libX11.a libxcb.a libXdmcp.a libXau.a libbz2.a liblzma.a libz.a libopenjp2.dylib libsoxr.dylib liborc-0.4.0.dylib libgnutls.dylib
 FW = Cocoa VideoDecodeAcceleration OpenGL CoreVideo CoreFoundation AudioUnit AudioToolbox IOKit Carbon
 ARCH = i386
-CFLAGS += $(foreach arch,$(ARCH),-arch $(arch))
+CFLAGS += $(foreach arch,$(ARCH),-arch $(arch)) -mmacosx-version-min=10.4
 TARGET = AutoDJ.app
 INSTALL_DIR = /Applications
+GCC_VERSION = $(shell $(CC) -dumpversion)
+GCC_VERSION_MAJOR = $(word 1,$(subst ., ,$(GCC_VERSION)))
+GCC_VERSION_MINOR = $(word 2,$(subst ., ,$(GCC_VERSION)))
+ifneq (,$(findstring 4.9.,$(GCC_VERSION)))
+CFLAGS += -Wl,-no_compact_unwind
+else
+ifneq (4,$(GCC_VERSION_MAJOR))
+CFLAGS += -Wl,-no_compact_unwind
+endif
+endif
 endif
 
 ifneq (,$(findstring MINGW,$(UNAME))$(findstring CYGWIN,$(UNAME)))
@@ -49,6 +59,11 @@ AutoDJ.app: AutoDJ Info.plist
 	rsync -ax AutoDJ.icns $@/Contents/Resources/
 	-cp $(PREFIX)/lib/libgcc/libstdc++.6.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libstdc++.6.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libgcc/libstdc++.6.dylib "@executable_path/libstdc++.6.dylib" $@/Contents/MacOS/AutoDJ
 	-cp $(PREFIX)/lib/libgcc/libgcc_s.1.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libgcc_s.1.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libgcc/libgcc_s.1.dylib "@executable_path/libgcc_s.1.dylib" $@/Contents/MacOS/AutoDJ
+	-cp $(PREFIX)/lib/libmodplug.1.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libmodplug.1.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libmodplug.1.dylib "@executable_path/libmodplug.1.dylib" $@/Contents/MacOS/AutoDJ
+	-cp $(PREFIX)/lib/libopenjp2.7.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libopenjp2.7.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libopenjp2.7.dylib "@executable_path/libopenjp2.7.dylib" $@/Contents/MacOS/AutoDJ
+	-cp $(PREFIX)/lib/libsoxr.0.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libsoxr.0.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libsoxr.0.dylib "@executable_path/libsoxr.0.dylib" $@/Contents/MacOS/AutoDJ
+	-cp $(PREFIX)/lib/liborc-0.4.0.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/liborc-0.4.0.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/liborc-0.4.0.dylib "@executable_path/liborc-0.4.0.dylib" $@/Contents/MacOS/AutoDJ
+	-cp $(PREFIX)/lib/libgnutls.30.dylib $@/Contents/MacOS/ && chmod ugo+rx $@/Contents/MacOS/libgnutls.30.dylib && $(PREFIX)/bin/install_name_tool -change $(PREFIX)/lib/libgnutls.30.dylib "@executable_path/libgnutls.30.dylib" $@/Contents/MacOS/AutoDJ
 	-codesign -s $(shell whoami) $@
 
 AutoDJ.res: AutoDJ.rc

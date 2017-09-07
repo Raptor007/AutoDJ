@@ -1018,7 +1018,7 @@ public:
 		Floor = 1;
 		HeadWidth = 0.15;
 		BehindScale = 0.5;
-		BounceEnergy = 0.75;
+		BounceEnergy = 0.375;
 	}
 	~ReverbParam(){}
 	
@@ -1942,6 +1942,7 @@ int main( int argc, char **argv )
 	int visualizer = 2;
 	bool playback = true;
 	bool sdl_audio = true;
+	bool buffer1auto = true, buffer2auto = true;
 #ifdef WAVEOUT
 	// Default to WaveOut.
 	sdl_audio = false;
@@ -2034,15 +2035,22 @@ int main( int argc, char **argv )
 			else if( strncasecmp( argv[ i ], "--channels=", strlen("--channels=") ) == 0 )
 				want.channels = atoi( argv[ i ] + strlen("--channels=") );
 			else if( strncasecmp( argv[ i ], "--buffer1=", strlen("--buffer1=") ) == 0 )
+			{
 				want.samples = atoi( argv[ i ] + strlen("--buffer1=") );
+				buffer1auto = false;
+			}
 			else if( strncasecmp( argv[ i ], "--buffer2=", strlen("--buffer2=") ) == 0 )
+			{
 				userdata.Buffer.SetSize( atoi( argv[ i ] + strlen("--buffer2=") ) * 2 * want.channels );
+				buffer2auto = false;
+			}
 			else if( strcasecmp( argv[ i ], "--no-playback" ) == 0 )
 				playback = false;
 			else if( strcasecmp( argv[ i ], "--compile" ) == 0 )
 			{
 				playback = false;
 				userdata.Buffer.SetSize( 0 );
+				buffer2auto = false;
 				window = false;
 				userdata.Repeat = false;
 				userdata.Shuffle = false;
@@ -2074,7 +2082,7 @@ int main( int argc, char **argv )
 		#ifdef WIN32
 		paths.push_back( "M:\\iTunes\\iTunes Music\\Trance" );
 		#else
-		char *home = getenv("HOME");
+		const char *home = getenv("HOME");
 		if( home )
 		{
 			int path_size = strlen(home) + strlen("/Music/iTunes/iTunes Music/Trance") + 1;
@@ -2115,6 +2123,16 @@ int main( int argc, char **argv )
 	av_log_set_level( AV_LOG_FATAL );
 	av_register_all();
 	
+	// If not specified, get good buffer sizes for the sample rate.
+	if( buffer1auto )
+	{
+		want.samples = 1;
+		while( want.samples < (want.freq * 0.075) )
+			want.samples <<= 1;
+	}
+	if( buffer2auto )
+		userdata.Buffer.SetSize( want.samples * 32 );
+	
 	// Prepare audio output.
 	userdata.Buffer.Callback = AudioCallback;
 	if( userdata.Buffer.BufferSize > 0 )
@@ -2122,6 +2140,7 @@ int main( int argc, char **argv )
 	else
 		want.callback = UnbufferedAudioCallback;
 	memcpy( &(userdata.Spec), &want, sizeof(want) );
+	
 	if( playback )
 	{
 #ifdef WAVEOUT
@@ -2545,18 +2564,18 @@ int main( int argc, char **argv )
 							if( shift || was_flat )
 							{
 								userdata.EQ->FreqScale.clear();
-								userdata.EQ->FreqScale[    32. ] = was_flat ? sqrt(2.) : 1.;
-								userdata.EQ->FreqScale[    64. ] = was_flat ?      2.  : 1.;
-								userdata.EQ->FreqScale[   125. ] = was_flat ?      2.  : 1.;
-								userdata.EQ->FreqScale[   250. ] = was_flat ? sqrt(2.) : 1.;
+								userdata.EQ->FreqScale[    32. ] = 1.;
+								userdata.EQ->FreqScale[    64. ] = 1.;
+								userdata.EQ->FreqScale[   125. ] = 1.;
+								userdata.EQ->FreqScale[   250. ] = 1.;
 								userdata.EQ->FreqScale[   500. ] = 1.;
-								userdata.EQ->FreqScale[  1000. ] = 1.;
-								userdata.EQ->FreqScale[  2000. ] = 1.;
-								userdata.EQ->FreqScale[  4000. ] = 1.;
-								userdata.EQ->FreqScale[  8000. ] = 1.;
-								userdata.EQ->FreqScale[ 16000. ] = 1.;
+								userdata.EQ->FreqScale[  1000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  2000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  4000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  8000. ] = was_flat ? pow( 2., -2./6. ) : 1.;
+								userdata.EQ->FreqScale[ 16000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
 								
-								snprintf( visualizer_message, 128, "Equalizer: %s\n", was_flat ? "Bass Boost" : "Flat" );
+								snprintf( visualizer_message, 128, "Equalizer: %s\n", was_flat ? "Earbuds" : "Flat" );
 							}
 							else
 								snprintf( visualizer_message, 128, "Equalizer: On\n" );
@@ -2578,7 +2597,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 32. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 32. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 32. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2592,7 +2611,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 64. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 64. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 64. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2606,7 +2625,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 125. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 125. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 125. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2620,7 +2639,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 250. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 250. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 250. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2634,7 +2653,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 500. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 500. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 500. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2648,7 +2667,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 1000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 1000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 1000. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2662,7 +2681,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 2000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 2000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 2000. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2676,7 +2695,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 4000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 4000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 4000. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2690,7 +2709,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 8000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 8000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 8000. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2704,7 +2723,7 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 16000. ) * (shift ? sqrt(0.5) : sqrt(2.));
+						double scale = userdata.EQ->GetScale( 16000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 16000. ] = scale;
 						double db = 6. * log2(scale);
 						
@@ -2716,24 +2735,24 @@ int main( int argc, char **argv )
 					else if( key == SDLK_r )
 					{
 						if( ! userdata.Reverb )
-						{
 							userdata.Reverb = disabled_reverb;
-							snprintf( visualizer_message, 128, "Reverb: On\n" );
-						}
 						else if( ! shift )
 						{
 							disabled_reverb = userdata.Reverb;
 							userdata.Reverb = NULL;
-							snprintf( visualizer_message, 128, "Reverb: Off\n" );
 						}
 						else
 						{
-							userdata.Reverb->BounceEnergy += 0.03125;
+							userdata.Reverb->BounceEnergy += 0.0625;
 							if( userdata.Reverb->BounceEnergy > 1. )
-								userdata.Reverb->BounceEnergy = 0.5;
+								userdata.Reverb->BounceEnergy = 0.125;
 							userdata.Reverb->Setup( userdata.Spec.freq );
-							snprintf( visualizer_message, 128, "Reverb Bounce: %0.1f%%\n", userdata.Reverb->BounceEnergy * 100. );
 						}
+						
+						if( userdata.Reverb )
+							snprintf( visualizer_message, 128, "Reverb Bounce: %0.1f%%\n", userdata.Reverb->BounceEnergy * 100. );
+						else
+							snprintf( visualizer_message, 128, "Reverb: Off\n" );
 						
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );

@@ -21,6 +21,7 @@
 #include "FontBin.h"
 #ifdef WAVEOUT
 #include <windows.h>
+#include <mmreg.h>
 #endif
 extern "C" {
 #include <libavcodec/avfft.h>
@@ -51,15 +52,19 @@ namespace ResampleMethod
 #define VISUALIZER_BACKGROUNDS 4
 
 int SongLoaderThread( void *data_ptr );
-double LinearCrossfade( double a, double b, double b_percent );
-double EqualPowerCrossfade( double a, double b, double b_percent );
-Sint16 Finalize( double value );
+float LinearCrossfade( float a, float b, float b_percent );
+float EqualPowerCrossfade( float a, float b, float b_percent );
+Sint16 FloatTo16( float value );
 bool CalculateCrossfade( const Song *current_song, const Song *next_song, double *crossfade_for_beats, double *crossfade_at_beat );
 void AudioCallback( void *userdata, Uint8* stream, int len );
 void BufferedAudioCallback( void *userdata, Uint8* stream, int len );
 void UnbufferedAudioCallback( void *userdata, Uint8* stream, int len );
 void UpdateVisualizerBuffer( UserData *ud, Uint8 *stream, int len );
 std::deque<std::string> DirSongs( std::string path );
+
+#ifdef __GNUC__
+#define ALLOW_VLA
+#endif
 
 #ifndef likely
 #ifdef __GNUC__
@@ -96,7 +101,7 @@ public:
 	double CurrentFrame, FirstBeatFrame, FirstOutroFrame;
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
-	double VolumeMax, VolumeAverage;
+	float VolumeMax, VolumeAverage;
 	volatile bool *RunningPtr;
 	
 	Song( const char *filename, volatile bool *running_ptr )
@@ -164,54 +169,80 @@ public:
 		FirstBeatFrame = Audio.SampleRate * ((60. * minutes) + seconds);
 	}
 	
-	double NearestFrame( Uint8 channel ) const
+	float SampleAtIndex( size_t index ) const
 	{
-		channel %= Audio.Channels;
-		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
-		size_t a_index = Audio.Channels * (size_t) CurrentFrame + channel;
-		size_t b_index = a_index + Audio.Channels;
-		Sint16 a = likely(a_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ a_index ] : 0;
-		Sint16 b = likely(b_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ b_index ] : 0;
-		double unused = 0.;
-		double b_part = modf( CurrentFrame, &unused );
-		return (b_part >= 0.5) ? b : a;
+		if(likely( index < Audio.Size / Audio.BytesPerSample ))
+		{
+			switch( Audio.BytesPerSample )
+			{
+				case 8:
+				{
+					double *buffer64 = (double*) Audio.Data;
+					return buffer64[ index ];
+				}
+				case 4:
+				{
+					float *buffer32 = (float*) Audio.Data;
+					return buffer32[ index ];
+				}
+				case 2:
+				{
+					Sint16 *buffer16 = (Sint16*) Audio.Data;
+					return buffer16[ index ] / 32768.;
+				}
+				case 1:
+				{
+					Uint8 *buffer8 = (Uint8*) Audio.Data;
+					return buffer8[ index ] / 128. - 1.;
+				}
+			}
+		}
+		return 0.f;
 	}
 	
-	double CubicFrame( Uint8 channel ) const
+	float SanitizedSample( size_t index ) const
+	{
+		// Avoid corrupted samples, which ffmpeg/libav sometimes feeds us.
+		float sample = SampleAtIndex(index);
+		if(likely( fabs(sample) <= 1.f ))
+			return sample;
+		return 0.f;
+	}
+	
+	float NearestFrame( Uint8 channel ) const
 	{
 		channel %= Audio.Channels;
-		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
+		size_t a_index = Audio.Channels * (size_t) CurrentFrame + channel;
+		size_t b_index = a_index + Audio.Channels;
+		float a = SampleAtIndex( a_index );
+		float b = SampleAtIndex( b_index );
+		double unused = 0.;
+		return (modf( CurrentFrame, &unused ) >= 0.5) ? b : a;
+	}
+	
+	float CubicFrame( Uint8 channel ) const
+	{
+		channel %= Audio.Channels;
 		size_t a_index = Audio.Channels * (size_t) CurrentFrame + channel;
 		size_t b_index = a_index + Audio.Channels;
 		long prev_index = a_index - Audio.Channels;
 		size_t next_index = b_index + Audio.Channels;
-		double a = 0., b = 0., prev = 0., next = 0.;
-		if(likely( (prev_index >= 0) && (next_index < Audio.Size / Audio.BytesPerSample) ))
-		{
-			prev = buffer16[ prev_index ];
-			a = buffer16[ a_index ];
-			b = buffer16[ b_index ];
-			next = buffer16[ next_index ];
-		}
-		else
-		{
-			prev = ((prev_index >= 0) && (prev_index < (long)( Audio.Size / Audio.BytesPerSample ))) ? buffer16[ prev_index ] : 0.;
-			a = (a_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ a_index ] : 0.;
-			b = (b_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ b_index ] : 0.;
-			next = (next_index < Audio.Size / Audio.BytesPerSample) ? buffer16[ next_index ] : 0.;
-		}
+		float a = SampleAtIndex( a_index );
+		float b = SampleAtIndex( b_index );
+		float prev = likely(prev_index >= 0) ? SampleAtIndex( prev_index ) : 0.f;
+		float next = SampleAtIndex( next_index );
 		double unused = 0.;
-		double b_part = modf( CurrentFrame, &unused );
+		float b_part = modf( CurrentFrame, &unused );
 		/*
-		double along_a_tangent = a + b_part * (b - prev) / 2.;
-		double along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
-		double remaining_portion = 1. - b_part * b_part - (1. - b_part) * (1. - b_part);
-		double linear = a + (b - a) * b_part;
+		float along_a_tangent = a + b_part * (b - prev) / 2.;
+		float along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
+		float remaining_portion = 1. - b_part * b_part - (1. - b_part) * (1. - b_part);
+		float linear = a + (b - a) * b_part;
 		return along_a_tangent * (1. - b_part) * (1. - b_part) + along_b_tangent * b_part * b_part + linear * remaining_portion;
 		*/
 		// Paul Breeuwsma came up with a simpler cubic interpolation than mine, so I'm using it.
 		// http://www.paulinternet.nl/?page=bicubic
-		return a + 0.5 * b_part * (b - prev + b_part * (2. * prev - 5. * a + 4. * b - next + b_part * (3. * (a - b) + next - prev)));
+		return a + 0.5f * b_part * (b - prev + b_part * (2.f * prev - 5.f * a + 4.f * b - next + b_part * (3.f * (a - b) + next - prev)));
 	}
 	
 	void Advance( double playback_bpm, int playback_rate )
@@ -303,14 +334,14 @@ public:
 		return (CurrentFrame >= TotalFrames);
 	}
 	
-	double VolumeAdjustment( void ) const
+	float VolumeAdjustment( void ) const
 	{
-		return 0.25 / VolumeAverage;
+		return 0.25f / VolumeAverage;
 	}
 	
-	double VolumeAdjustmentToMax( void ) const
+	float VolumeAdjustmentToMax( void ) const
 	{
-		return 1. / VolumeMax;
+		return 1.f / VolumeMax;
 	}
 	
 	void SetIntroOutroBeats( int crossfade_in = -1, int crossfade_out = -1 )
@@ -366,8 +397,6 @@ public:
 		if( !( Audio.Data && Audio.Size ) )
 			return;
 		
-		Sint16 *buffer16 = (Sint16*) Audio.Data;  // FIXME: Use BytesPerSample.
-		
 		// Don't analyze more than 10 minutes of audio per song.
 		size_t max_analysis_frame = std::min<size_t>( Audio.SampleRate * 60 * 10 + first_frame, TotalFrames );
 		
@@ -380,26 +409,29 @@ public:
 		{
 			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
 			{
-				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
-				if( this_amp > VolumeMax )
+				float this_amp = fabs( SampleAtIndex( frame * Audio.Channels + channel ) );
+				if( likely(this_amp <= 1.f) && (this_amp > VolumeMax) )
 					VolumeMax = this_amp;
 			}
 		}
-		VolumeAverage = 0.;
+		double volume_sum = 0.;
 		size_t samples_in_average = 0;
 		for( size_t frame = first_frame; frame < max_analysis_frame; frame ++ )
 		{
 			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
 			{
-				double this_amp = fabs( buffer16[ frame * Audio.Channels + channel ] ) / 32767.;
-				if( this_amp > VolumeMax / 8. )
+				double this_amp = fabs( SampleAtIndex( frame * Audio.Channels + channel ) );
+				if( likely(this_amp <= 1.) && (this_amp > VolumeMax / 8.) )
 				{
-					VolumeAverage += this_amp;
+					volume_sum += this_amp;
 					samples_in_average ++;
 				}
 			}
 		}
-		VolumeAverage /= samples_in_average;
+		if( samples_in_average )
+			VolumeAverage = volume_sum / samples_in_average;
+		else
+			VolumeAverage = VolumeMax / 4.;
 		
 		SDL_Delay( 1 );
 		if( ! *RunningPtr )
@@ -417,7 +449,7 @@ public:
 		// Get starting block sum for the low-pass filter.
 		for( size_t frame = first_frame; frame < lpf_samples + first_frame; frame ++ )
 			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
-				prev += buffer16[ frame * Audio.Channels + channel ] / (double) Audio.Channels;
+				prev += SanitizedSample( frame * Audio.Channels + channel ) / (double) Audio.Channels;
 		
 		SDL_Delay( 1 );
 		if( ! *RunningPtr )
@@ -430,8 +462,8 @@ public:
 			double point = prev;
 			for( size_t channel = 0; channel < Audio.Channels; channel ++ )
 			{
-				point -= buffer16[ (frame - lpf_samples) * Audio.Channels + channel ] / (double) Audio.Channels;
-				point += buffer16[ frame * Audio.Channels + channel ] / (double) Audio.Channels;
+				point -= SanitizedSample( (frame - lpf_samples) * Audio.Channels + channel ) / (double) Audio.Channels;
+				point += SanitizedSample( frame * Audio.Channels + channel ) / (double) Audio.Channels;
 			}
 			double point_abs = fabs(point);
 			
@@ -770,32 +802,32 @@ public:
 class EqualizerParam
 {
 public:
-	std::map<double,double> FreqScale;
+	std::map<float,float> FreqScale;
 	
 	EqualizerParam( void ){}
 	~EqualizerParam(){}
 	
-	double LookupScale( double freq ) const
+	float LookupScale( float freq ) const
 	{
-		std::map<double,double>::const_iterator found = FreqScale.lower_bound( freq );
+		std::map<float,float>::const_iterator found = FreqScale.lower_bound( freq );
 		
 		// If it's higher than our highest specified, use the highest.
 		if( found == FreqScale.end() )
-			return FreqScale.size() ? FreqScale.rbegin()->second : 1.;
+			return FreqScale.size() ? FreqScale.rbegin()->second : 1.f;
 		
 		// If it's less than or equal to our lowest specified, use the lowest.
 		if( found == FreqScale.begin() )
 			return found->second;
 		
-		std::map<double,double>::const_iterator prev = found;
+		std::map<float,float>::const_iterator prev = found;
 		prev --;
 		
 		// Interpolate linearly between nearest freqency volume scales.
-		double b_part = (freq - prev->first) / (found->first - prev->first);
+		float b_part = (freq - prev->first) / (found->first - prev->first);
 		return prev->second * (1. - b_part) + found->second * b_part;
 	}
 	
-	double GetScale( double freq ) const
+	float GetScale( float freq ) const
 	{
 		#define TRANSITION_AT (20094.)
 		#define TRANSITION_TO (20627.)
@@ -806,25 +838,25 @@ public:
 		
 		// Above the transition band, use 0Hz scale.
 		if( freq >= TRANSITION_TO )
-			return LookupScale(0.);
+			return LookupScale(0.f);
 		
 		// Within the transition band, interpolate from top EQ scale to 0Hz scale.
-		double end_part = (freq - TRANSITION_AT) / (TRANSITION_TO - TRANSITION_AT);
-		return LookupScale(TRANSITION_AT) * (1. - end_part) + LookupScale(0.) * end_part;
+		float end_part = (freq - TRANSITION_AT) / (TRANSITION_TO - TRANSITION_AT);
+		return LookupScale(TRANSITION_AT) * (1.f - end_part) + LookupScale(0.f) * end_part;
 	}
 	
-	double GetScale( size_t index, size_t frames, unsigned int rate ) const
+	float GetScale( size_t index, size_t frames, unsigned int rate ) const
 	{
-		return GetScale( ((double) index) * rate / frames );
+		return GetScale( ((float) index) * rate / frames );
 	}
 	
-	double MaxScale( void ) const
+	float MaxScale( void ) const
 	{
 		if( ! FreqScale.size() )
-			return 1.;
+			return 1.f;
 		
-		std::map<double,double>::const_iterator iter = FreqScale.begin();
-		double max = iter->second;
+		std::map<float,float>::const_iterator iter = FreqScale.begin();
+		float max = iter->second;
 		for( iter ++; iter != FreqScale.end(); iter ++ )
 		{
 			if( iter->second > max )
@@ -833,13 +865,13 @@ public:
 		return max;
 	}
 	
-	double MinScale( void ) const
+	float MinScale( void ) const
 	{
 		if( ! FreqScale.size() )
-			return 1.;
+			return 1.f;
 		
-		std::map<double,double>::const_iterator iter = FreqScale.begin();
-		double min = iter->second;
+		std::map<float,float>::const_iterator iter = FreqScale.begin();
+		float min = iter->second;
 		for( iter ++; iter != FreqScale.end(); iter ++ )
 		{
 			if( iter->second < min )
@@ -848,13 +880,13 @@ public:
 		return min;
 	}
 	
-	double AvgScale( void ) const
+	float AvgScale( void ) const
 	{
 		if( ! FreqScale.size() )
-			return 1.;
+			return 1.f;
 		
-		double total = 0.;
-		for( std::map<double,double>::const_iterator iter = FreqScale.begin(); iter != FreqScale.end(); iter ++ )
+		float total = 0.f;
+		for( std::map<float,float>::const_iterator iter = FreqScale.begin(); iter != FreqScale.end(); iter ++ )
 			total += iter->second;
 		return total / FreqScale.size();
 	}
@@ -888,13 +920,13 @@ public:
 		av_free( Complex );
 	}
 	
-	void Process( Sint16 *buffer, EqualizerParam *param, double max = 0. )
+	void Process( float *buffer, EqualizerParam *param, float max = 0.f )
 	{
 		// If clipping prevention is enabled, scale down if needed.
-		double pre_eq = 1.;
+		float pre_eq = 1.f;
 		if( max )
 		{
-			double highest = param->MaxScale();
+			float highest = param->MaxScale();
 			if( highest > max )
 				pre_eq = max / highest;
 		}
@@ -903,24 +935,24 @@ public:
 		{
 			memset( Complex, 0, Frames * sizeof(FFTComplex) );
 			for( size_t i = 0; i < Frames; i ++ )
-				Complex[ i ].re = buffer[ (i * Channels) + ch ] * pre_eq / 32768.f;
+				Complex[ i ].re = buffer[ (i * Channels) + ch ] * pre_eq;
 			av_fft_permute( Context1, Complex );
 			av_fft_calc( Context1, Complex );
 			
 			// Apply equalizer to all frequency bins, and their negative bins.
 			for( size_t i = 1; i < Frames / 2; i ++ )
 			{
-				double scale = param->GetScale( i, Frames, Rate );
+				float scale = param->GetScale( i, Frames, Rate );
 				Complex[ i ].re *= scale;
 				Complex[ i ].im *= scale;
 				Complex[ Frames - i ].re *= scale;
 				Complex[ Frames - i ].im *= scale;
 			}
 			
-			double scale0 = param->GetScale(0.);
+			float scale0 = param->GetScale(0.f);
 			Complex[ 0 ].re *= scale0;
 			Complex[ 0 ].im *= scale0;
-			double scaleH = param->GetScale( Frames / 2, Frames, Rate );
+			float scaleH = param->GetScale( Frames / 2, Frames, Rate );
 			Complex[ Frames / 2 ].re *= scaleH;
 			Complex[ Frames / 2 ].im *= scaleH;
 			
@@ -928,19 +960,19 @@ public:
 			av_fft_calc( Context2, Complex );
 			
 			#define EQ_ANTIPOP (Rate / 500)  // 2ms each end = 88 samples each end at 44.1KHz
-			double new_scale = 32768. / Frames;
-			double old_scale = pre_eq * scale0;
+			float new_scale = 1.f / Frames;
+			float old_scale = pre_eq * scale0;
 			
 			for( size_t i = EQ_ANTIPOP; i < Frames - EQ_ANTIPOP; i ++ )
-				buffer[ (i * Channels) + ch ] = Finalize( Complex[ i ].re * new_scale );
+				buffer[ (i * Channels) + ch ] = Complex[ i ].re * new_scale;
 			
 			size_t end_antipop = std::min<size_t>( Frames / 2, EQ_ANTIPOP );
 			for( size_t i = 0; i < end_antipop; i ++ )
 			{
-				double new_part = i / (double) EQ_ANTIPOP;
-				buffer[ (i * Channels) + ch ] = Finalize( new_part * Complex[ i ].re * new_scale + (1. - new_part) * old_scale * buffer[ (i * Channels) + ch ] );
+				float new_part = i / (float) EQ_ANTIPOP;
+				buffer[ (i * Channels) + ch ] = new_part * Complex[ i ].re * new_scale + (1.f - new_part) * old_scale * buffer[ (i * Channels) + ch ];
 				size_t j = Frames - 1 - i;
-				buffer[ (j * Channels) + ch ] = Finalize( new_part * Complex[ j ].re * new_scale + (1. - new_part) * old_scale * buffer[ (j * Channels) + ch ] );
+				buffer[ (j * Channels) + ch ] = new_part * Complex[ j ].re * new_scale + (1.f - new_part) * old_scale * buffer[ (j * Channels) + ch ];
 			}
 		}
 	}
@@ -956,13 +988,13 @@ public:
 	Equalizer( void ){}
 	~Equalizer(){}
 	
-	void Process( Sint16* buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param, double max = 0. )
+	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param, float max = 0. )
 	{
 		#ifdef EQ_FRAMES
 		if( frames > EQ_FRAMES )
 		{
 			for( size_t chunk = 0; (chunk + 1) * EQ_FRAMES <= frames; chunk ++ )
-				Process( (Sint16*) (((char*) buffer) + 2 * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param, max );
+				Process( (float*) (((char*) buffer) + sizeof(*buffer) * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param, max );
 			return;
 		}
 		#endif
@@ -989,10 +1021,10 @@ class ReverbBounce
 {
 public:
 	size_t FramesBack;
-	double AmpScale;
+	float AmpScale;
 	
 	ReverbBounce( void ) { FramesBack = 0; AmpScale = 0; }
-	ReverbBounce( size_t f, double a ) { FramesBack = f; AmpScale = a; }
+	ReverbBounce( size_t f, float a ) { FramesBack = f; AmpScale = a; }
 	~ReverbBounce(){}
 };
 
@@ -1000,10 +1032,10 @@ public:
 class ReverbParam
 {
 public:
-	double SpeakerSide, SpeakerFront, SideWall, FrontWall, BackWall, Ceiling, Floor;
-	double HeadWidth, BehindScale;
-	double BounceEnergy;
-	double TotalScale;
+	float SpeakerSide, SpeakerFront, SideWall, FrontWall, BackWall, Ceiling, Floor;
+	float HeadWidth, BehindScale;
+	float BounceEnergy;
+	float TotalScale;
 	
 	std::vector<ReverbBounce> SameSide, OppoSide;
 	
@@ -1022,26 +1054,26 @@ public:
 	}
 	~ReverbParam(){}
 	
-	double SpeakerDist( void ) const
+	float SpeakerDist( void ) const
 	{
 		return sqrt( SpeakerSide * SpeakerSide + SpeakerFront * SpeakerFront );
 	}
 	
-	double BouncedDist( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
+	float BouncedDist( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
 	{
-		double x = SpeakerSide - HeadWidth / 2.;
+		float x = SpeakerSide - HeadWidth / 2.f;
 		if( x_bounces % 2 )
 			x += 2 * (opposite ? SideWall : SideWall - SpeakerSide);
 		x += (x_bounces / 2) * SideWall * 4;
 		if( opposite && ! x_bounces )
 			x += HeadWidth;
 		
-		double y = SpeakerFront;
+		float y = SpeakerFront;
 		if( y_bounces % 2 )
 			y += 2 * BackWall;
 		y += (y_bounces / 2) * (FrontWall + BackWall) * 2;
 		
-		double z = 0.;
+		float z = 0.f;
 		if( z_bounces % 2 )
 			z += 2 * (up ? Ceiling : Floor);
 		z += (z_bounces / 2) * (Ceiling + Floor) * 2;
@@ -1049,14 +1081,14 @@ public:
 		return sqrt( x * x + y * y + z * z ) - SpeakerDist();
 	}
 	
-	double AmpScale( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
+	float AmpScale( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
 	{
-		double bounced = BouncedDist( x_bounces, y_bounces, z_bounces, up, opposite );
-		double speaker = SpeakerDist();
-		double scale = pow( BounceEnergy, x_bounces + y_bounces + z_bounces ) * speaker / (bounced + speaker);
+		float bounced = BouncedDist( x_bounces, y_bounces, z_bounces, up, opposite );
+		float speaker = SpeakerDist();
+		float scale = pow( BounceEnergy, x_bounces + y_bounces + z_bounces ) * speaker / (bounced + speaker);
 		scale *= pow( 0.75, up ? (z_bounces / 2) : ((z_bounces + 1) / 2) ); // Carpet on the floor.
 		if( y_bounces % 2 ) // Arriving from behind.
-			scale *= pow( BehindScale, y_bounces / (double)(x_bounces + y_bounces) );
+			scale *= pow( BehindScale, y_bounces / (float)(x_bounces + y_bounces) );
 		if( opposite && ! x_bounces )
 			scale *= SpeakerFront / sqrt( SpeakerSide * SpeakerSide + SpeakerFront * SpeakerFront );
 		return scale;
@@ -1099,7 +1131,7 @@ public:
 class Reverb
 {
 private:
-	Sint16* History;
+	float *History;
 	unsigned int Rate;
 
 public:
@@ -1108,18 +1140,18 @@ public:
 	
 	#define REVERB_HISTORY_FRAMES 262144
 	
-	void Process( Sint16* buffer, unsigned int channels, unsigned int rate, size_t frames, ReverbParam *param, double max = 0. )
+	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, ReverbParam *param, float max = 0.f )
 	{
 		bool changed_rate = (Rate != rate);
 		Rate = rate;
 		
-		size_t buff_bytes = 2 * channels * frames;
-		size_t hist_bytes = 2 * channels * REVERB_HISTORY_FRAMES;
+		size_t buff_bytes = sizeof(*History) * channels * frames;
+		size_t hist_bytes = sizeof(*History) * channels * REVERB_HISTORY_FRAMES;
 		uint8_t *raw_history = (uint8_t*) History;
 		
 		if( ! History )
 		{
-			History = (Sint16*) malloc( hist_bytes );
+			History = (float*) malloc( hist_bytes );
 			memset( History, 0, hist_bytes );
 			raw_history = (uint8_t*) History;
 		}
@@ -1135,7 +1167,7 @@ public:
 			param->Setup( rate );
 		
 		// If clipping prevention is enabled, scale down if needed.
-		double scale = 1.;
+		float scale = 1.f;
 		if( max && (param->TotalScale > max) )
 			scale = max / param->TotalScale;
 		
@@ -1147,7 +1179,7 @@ public:
 			for( size_t frame = 0; frame < frames; frame ++ )
 			{
 				size_t index = channels * frame + ch;
-				double val = buffer[ index ];
+				float val = buffer[ index ];
 				size_t frames_back = frames - 1 - frame;
 				for( size_t i = 0; i < bounces_same; i ++ )
 				{
@@ -1161,7 +1193,7 @@ public:
 					if( from_frame >= 0 )
 						val += History[ channels * from_frame + (ch+1)%channels ] * param->OppoSide[ i ].AmpScale;
 				}
-				buffer[ index ] = Finalize( val * scale );
+				buffer[ index ] = val * scale;
 			}
 		}
 	}
@@ -1181,15 +1213,16 @@ public:
 	bool Running;
 	bool Crossfading;
 	SDL_AudioSpec Spec;
+	bool HighRes;
 	double BPM;
 	bool SourceBPM;
 	double SourcePitchScale;
 	uint8_t Resample;
 	int CrossfadeIn;
 	int CrossfadeOut;
-	double Volume;
+	float Volume;
 	bool VolumeMatching;
-	double VolumeLimit;
+	float VolumeLimit;
 	bool Repeat;
 	bool Shuffle;
 	size_t ShuffleDelay;
@@ -1218,6 +1251,7 @@ public:
 		Running = true;
 		Crossfading = false;
 		memset( &Spec, 0, sizeof(Spec) );
+		HighRes = false;
 		BPM = 140.;
 		SourceBPM = true;
 		SourcePitchScale = 1.;
@@ -1367,7 +1401,7 @@ public:
 			Loader.Running = false;
 	}
 	
-	float VisualizerAmpScale( void )
+	float VisualizerAmpScale( void ) const
 	{
 		// Make the visualizer look good regardless of volume/EQ/reverb/clipping settings.
 		
@@ -1403,6 +1437,13 @@ public:
 			return 1.f;
 		
 		return 1.f / volume;
+	}
+	
+	float VisualizerSample( size_t index ) const
+	{
+		if( ! HighRes )
+			return (((Sint16*)( VisualizerBuffer ))[ index % (VisualizerBufferSize / sizeof(Sint16)) ] / 32768.f) * VisualizerAmpScale();
+		return ((float*)( VisualizerBuffer ))[ index % (VisualizerBufferSize / sizeof(float)) ] * VisualizerAmpScale();
 	}
 	
 	~UserData(){}
@@ -1457,33 +1498,34 @@ int SongLoaderThread( void *loader_ptr )
 // --------------------------------------------------------------------------------------
 
 
-double LinearCrossfade( double a, double b, double b_percent )
+float LinearCrossfade( float a, float b, float b_percent )
 {
-	return a * (1. - b_percent) + b * b_percent;
+	return a * (1.f - b_percent) + b * b_percent;
 }
 
 
-double EqualPowerCrossfade( double a, double b, double b_percent )
+float EqualPowerCrossfade( float a, float b, float b_percent )
 {
-	return a * cos( b_percent * M_PI * 0.5 ) + b * cos( (1. - b_percent) * M_PI * 0.5 );
+	return a * cos( b_percent * M_PI * 0.5f ) + b * cos( (1.f - b_percent) * M_PI * 0.5f );
 }
 
 
-Sint16 Finalize( double value )
+Sint16 FloatTo16( float value )
 {
-	if( value >= 0. )
+	value *= 32768.f;
+	if( value >= 0.f )
 	{
-		if( value > 32767. )
-			return 32767;
+		if(likely( value < 32767.f ))
+			return value + 0.5f;
 		else
-			return value + 0.5;
+			return 32767;
 	}
 	else
 	{
-		if( value < -32768. )
-			return -32768;
+		if(likely( value > -32768.f ))
+			return value - 0.5f;
 		else
-			return value - 0.5;
+			return -32768;
 	}
 }
 
@@ -1540,185 +1582,217 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	if( !( ud->Playing || ud->Buffer.BufferSize ) )
 		return;
 	
-	// For simplicity's sake, assume it's always 16-bit audio output.
-	Sint16 *stream16 = (Sint16*) stream;
+	size_t songs_size = ud->Songs.size();
+	if( ! songs_size )
+		return;
+	
+	size_t samples = len / sizeof(Sint16);
+#ifdef ALLOW_VLA
+	float streamTemp[ samples ];
+#endif
+
+	float *streamF = NULL;
+	if( ! ud->HighRes )
+	{
+		// Create an intermediate floating-point buffer for audio processing.
+#ifdef ALLOW_VLA
+		streamF = streamTemp;
+#else
+		streamF = (float*) malloc( samples * sizeof(float) );
+#endif
+		memset( streamF, 0, samples * sizeof(float) );
+	}
+	else
+	{
+		// Write directly to high-resolution floating-point audio stream.
+		streamF = (float*) stream;
+		samples = len / sizeof(float);
+	}
 	
 	bool calculated_crossfade = false;
 	double crossfade_for_beats = 96.;
 	double crossfade_at_beat = 0.;
 	bool crossfade_now = false;
-	double crossfade = 0.;
-	double volume = 1.;
-	double volume_next = 1.;
+	float crossfade = 0.;
+	float volume = 1.;
+	float volume_next = 1.;
 	
-	size_t songs_size = ud->Songs.size();
-	if( songs_size )
+	Song *current_song = ud->Songs.front();
+	Song *next_song = (songs_size >= 2) ? ud->Songs.at( 1 ) : NULL;
+	
+	double bpm = ud->SourceBPM ? (current_song->BPM * ud->SourcePitchScale) : ud->BPM;
+	
+	volume = ud->VolumeMatching ? ud->Volume * current_song->VolumeAdjustment() : ud->Volume;
+	volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
+	if( ud->VolumeLimit )
 	{
-		Song *current_song = ud->Songs.front();
-		Song *next_song = (songs_size >= 2) ? ud->Songs.at( 1 ) : NULL;
+		volume = std::min<float>( current_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume );
+		if( next_song )
+			volume_next = std::min<float>( next_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume_next );
+	}
+	
+	for( size_t i = 0; i < samples; i += ud->Spec.channels )
+	{
+		// Check for crossfade into second song.
 		
-		double bpm = ud->SourceBPM ? (current_song->BPM * ud->SourcePitchScale) : ud->BPM;
+		crossfade_now = false;
+		crossfade = 0.;
 		
-		volume = ud->VolumeMatching ? ud->Volume * current_song->VolumeAdjustment() : ud->Volume;
-		volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
-		if( ud->VolumeLimit )
+		if( next_song )
 		{
-			volume = std::min<double>( current_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume );
-			if( next_song )
-				volume_next = std::min<double>( next_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume_next );
-		}
-		
-		for( int i = 0; i < len / 2; i += ud->Spec.channels )
-		{
-			// Check for crossfade into second song.
+			// Calculate when to do the crossfade and for how long.
+			if( ! calculated_crossfade )
+				calculated_crossfade = CalculateCrossfade( current_song, next_song, &crossfade_for_beats, &crossfade_at_beat );
 			
-			crossfade_now = false;
-			crossfade = 0.;
-			
-			if( next_song )
+			// Now that we've determined how crossfade should be done, see if we should do it now.
+			if( calculated_crossfade && (current_song->Beat() >= crossfade_at_beat) )
 			{
-				// Calculate when to do the crossfade and for how long.
-				if( ! calculated_crossfade )
-					calculated_crossfade = CalculateCrossfade( current_song, next_song, &crossfade_for_beats, &crossfade_at_beat );
+				crossfade_now = true;
 				
-				// Now that we've determined how crossfade should be done, see if we should do it now.
-				if( calculated_crossfade && (current_song->Beat() >= crossfade_at_beat) )
+				if( crossfade_for_beats > 0. )
 				{
-					crossfade_now = true;
-					
-					if( crossfade_for_beats > 0. )
-					{
-						crossfade = (current_song->Beat() - crossfade_at_beat) / crossfade_for_beats;
-						if( crossfade > 1. )
-							crossfade = 1.;
-					}
-					else
+					crossfade = (current_song->Beat() - crossfade_at_beat) / crossfade_for_beats;
+					if( crossfade > 1. )
 						crossfade = 1.;
 				}
-			}
-			
-			
-			if( ! crossfade_now )
-			{
-				// Not crossfading yet.
-				
-				if( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) )
-				{
-					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->NearestFrame( channel ) * volume );
-				}
 				else
-				{
-					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-						stream16[ i + channel ] = Finalize( current_song->CubicFrame( channel ) * volume );
-				}
-				
-				current_song->Advance( bpm, ud->Spec.freq );
+					crossfade = 1.;
+			}
+		}
+		
+		
+		if( ! crossfade_now )
+		{
+			// Not crossfading yet.
+			
+			if( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) )
+			{
+				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
+					streamF[ i + channel ] = current_song->NearestFrame( channel ) * volume;
 			}
 			else
 			{
-				// Crossfading now.
-				
-				if( ud->SourceBPM )
-					bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
-				
-				bool a_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) );
-				bool b_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(next_song->BPM - bpm) < 0.05)) );
-				
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-				{
-					double a = (a_nearest ? current_song->NearestFrame( channel ) : current_song->CubicFrame( channel )) * volume;
-					double b = (b_nearest ? next_song->NearestFrame( channel ) : next_song->CubicFrame( channel )) * volume_next;
-					stream16[ i + channel ] = Finalize( EqualPowerCrossfade( a, b, crossfade ) );
-				}
-				
-				current_song->Advance( bpm, ud->Spec.freq );
-				next_song->Advance( bpm, ud->Spec.freq );
-				
-				// If we completed a crossfade, treat the next song as current.
-				// Leave a note for the main thread that there's a song to remove.
-				if(unlikely( crossfade >= 1. ))
-				{
-					ud->MostRecentToRemove = current_song;
-					
-					current_song = next_song;
-					next_song = (songs_size >= 3) ? ud->Songs.at( 2 ) : NULL;
-					
-					volume = volume_next;
-					volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
-					if( ud->VolumeLimit && next_song )
-						volume_next = std::min<double>( next_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume_next );
-					
-					calculated_crossfade = false;
-					crossfade_now = false;
-					crossfade = 0.;
-				}
+					streamF[ i + channel ] = current_song->CubicFrame( channel ) * volume;
 			}
 			
-			ud->Crossfading = crossfade_now;
+			current_song->Advance( bpm, ud->Spec.freq );
+		}
+		else
+		{
+			// Crossfading now.
 			
+			if( ud->SourceBPM )
+				bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
 			
-			// Add metronome if enabled.
+			bool a_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) );
+			bool b_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(next_song->BPM - bpm) < 0.05)) );
 			
-			if( ud->Metronome )
+			for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 			{
-				double beat_ipart = 0.;
-				double beat_fpart = modf( current_song->Beat(), &beat_ipart );
+				float a = (a_nearest ? current_song->NearestFrame( channel ) : current_song->CubicFrame( channel )) * volume;
+				float b = (b_nearest ? next_song->NearestFrame( channel ) : next_song->CubicFrame( channel )) * volume_next;
+				streamF[ i + channel ] = EqualPowerCrossfade( a, b, crossfade );
+			}
+			
+			current_song->Advance( bpm, ud->Spec.freq );
+			next_song->Advance( bpm, ud->Spec.freq );
+			
+			// If we completed a crossfade, treat the next song as current.
+			// Leave a note for the main thread that there's a song to remove.
+			if(unlikely( crossfade >= 1. ))
+			{
+				ud->MostRecentToRemove = current_song;
 				
-				if( beat_fpart < 0. )
-				{
-					beat_fpart += 1.;
-					beat_ipart -= 2.; // -1, and then another to fix the rounding direction.
-				}
+				current_song = next_song;
+				next_song = (songs_size >= 3) ? ud->Songs.at( 2 ) : NULL;
 				
-				if( beat_fpart < 0.25 )
-				{
-					int ipart = (((int)( beat_ipart + 0.5 )) % 4 + 4) % 4;
-					double hz = ipart ? 960. : 1920.;
-					double wave_value = (sin( beat_fpart * hz ) * 8000. * cos( beat_fpart * M_PI * 2. ));
-					
-					for( int channel = 0; channel < ud->Spec.channels; channel ++ )
-					{
-						if( (ud->Metronome != 2) || (ipart % ud->Spec.channels == channel) )
-							stream16[ i + channel ] = Finalize( stream16[ i + channel ] + wave_value );
-					}
-				}
+				volume = volume_next;
+				volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
+				if( ud->VolumeLimit && next_song )
+					volume_next = std::min<float>( next_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume_next );
+				
+				calculated_crossfade = false;
+				crossfade_now = false;
+				crossfade = 0.;
 			}
 		}
 		
-		// If we're supposed to write our output to a file, do it after each buffer we fill.
-		if( ud->WriteTo )
+		ud->Crossfading = crossfade_now;
+		
+		
+		// Add metronome if enabled.
+		
+		if( ud->Metronome )
 		{
-			fwrite( stream, 1, len, ud->WriteTo );
-			ud->WroteBytes += len;
+			double beat_ipart = 0.;
+			double beat_fpart = modf( current_song->Beat(), &beat_ipart );
+			
+			if( beat_fpart < 0. )
+			{
+				beat_fpart += 1.;
+				beat_ipart -= 2.; // -1, and then another to fix the rounding direction.
+			}
+			
+			if( beat_fpart < 0.25 )
+			{
+				int ipart = (((int)( beat_ipart + 0.5 )) % 4 + 4) % 4;
+				float hz = ipart ? 960. : 1920.;
+				float wave_value = (sin( beat_fpart * hz ) * 0.25 * cos( beat_fpart * M_PI * 2. ));
+				
+				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
+				{
+					if( (ud->Metronome == 2) || (ipart % ud->Spec.channels == channel) )
+						streamF[ i + channel ] = streamF[ i + channel ] + wave_value;
+				}
+			}
 		}
 	}
 	
-	
 	// Determine max volume for post effects (EQ/reverb).
-	double max = 0.;
+	float max = 0.f;
 	if( ud->VolumeLimit )
 	{
-		double vol = volume * (1. - crossfade) + volume_next * crossfade;
-		max = vol ? (ud->VolumeLimit / vol) : 0.;
+		float vol = volume * (1.f - crossfade) + volume_next * crossfade;
+		max = vol ? (ud->VolumeLimit / vol) : 0.f;
 	}
-	
+		
 	// Apply equalizer if enabled.
 	if( ud->EQ )
 	{
-		GlobalEQ.Process( (Sint16*) stream, ud->Spec.channels, ud->Spec.freq, len / (2 * ud->Spec.channels), ud->EQ, max );
+		GlobalEQ.Process( streamF, ud->Spec.channels, ud->Spec.freq, samples / ud->Spec.channels, ud->EQ, max );
 		if( max )
 		{
-			double highest = ud->EQ->MaxScale();
+			float highest = ud->EQ->MaxScale();
 			if( highest > max )
 				max = 1.f;  // The EQ already hit our volume cap, so don't let reverb go louder.
 			else
 				max /= highest;
 		}
 	}
-	
+		
 	// Apply reverb if enabled, or just remember old audio buffer.
-	GlobalReverb.Process( (Sint16*) stream, ud->Spec.channels, ud->Spec.freq, len / (2 * ud->Spec.channels), ud->Reverb, max );
+	GlobalReverb.Process( streamF, ud->Spec.channels, ud->Spec.freq, samples / ud->Spec.channels, ud->Reverb, max );
+	
+	// If not outputting float, convert to 16-bit output format.
+	if( (void*) streamF != stream )
+	{
+		Sint16 *stream16 = (Sint16*) stream;
+		for( size_t i = 0; i < samples; i ++ )
+			stream16[ i ] = FloatTo16( streamF[ i ] );
+		
+#ifndef ALLOW_VLA
+		free( streamF );
+		streamF = NULL;
+#endif
+	}
+	
+	// If we're supposed to write our output to a file, do it after each buffer we fill.
+	if( ud->WriteTo )
+	{
+		fwrite( stream, 1, len, ud->WriteTo );
+		ud->WroteBytes += len;
+	}
 	
 	// Remove tracks that have finished playing.
 	while( ud->Songs.size() && (ud->Songs.front()->Finished()) )
@@ -1946,6 +2020,7 @@ int main( int argc, char **argv )
 #ifdef WAVEOUT
 	// Default to WaveOut.
 	sdl_audio = false;
+	bool high_res = true;
 #endif
 	const char *write = NULL;
 	SDL_AudioSpec want;
@@ -1963,12 +2038,16 @@ int main( int argc, char **argv )
 	{
 		if( strncmp( argv[ i ], "--", 2 ) == 0 )
 		{
-			if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
-				window = false;
-#ifdef WAVEOUT
-			else if( strcasecmp( argv[ i ], "--sdl-audio" ) == 0 )
+			// -- WaveOut --
+			if( strcasecmp( argv[ i ], "--sdl-audio" ) == 0 )
 				sdl_audio = true;
+#ifdef WAVEOUT
+			else if( strcasecmp( argv[ i ], "--16-bit" ) == 0 )
+				high_res = false;
 #endif
+			// -------------
+			else if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
+				window = false;
 			else if( strcasecmp( argv[ i ], "--fullscreen" ) == 0 )
 			{
 				window = true;
@@ -2016,7 +2095,7 @@ int main( int argc, char **argv )
 				const char *eq = argv[ i ] + strlen("--eq=");
 				while( eq && eq[ 0 ] )
 				{
-					double freq = atof( eq );
+					float freq = atof( eq );
 					const char *colon = strchr( eq, ':' );
 					if( colon )
 					{
@@ -2131,7 +2210,7 @@ int main( int argc, char **argv )
 			want.samples <<= 1;
 	}
 	if( buffer2auto )
-		userdata.Buffer.SetSize( want.samples * 32 );
+		userdata.Buffer.SetSize( want.samples * want.channels * sizeof(Sint16) * 8 );
 	
 	// Prepare audio output.
 	userdata.Buffer.Callback = AudioCallback;
@@ -2155,14 +2234,27 @@ int main( int argc, char **argv )
 				// Start WaveOut.
 				WAVEFORMATEX wfx;
 				memset( &wfx, 0, sizeof(WAVEFORMATEX) );
-				wfx.wFormatTag = WAVE_FORMAT_PCM;
-				wfx.wBitsPerSample = 16;
 				wfx.nChannels = want.channels;
 				wfx.nSamplesPerSec = want.freq;
-				wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
-				wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
 				wfx.cbSize = 0;
-				MMRESULT wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+				MMRESULT wave_out_result = ~MMSYSERR_NOERROR;
+				if( high_res )
+				{
+					wfx.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+					wfx.wBitsPerSample = 32;
+					wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
+					wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
+					wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+				}
+				if( wave_out_result != MMSYSERR_NOERROR )
+				{
+					high_res = false;
+					wfx.wFormatTag = WAVE_FORMAT_PCM;
+					wfx.wBitsPerSample = 16;
+					wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
+					wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
+					wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+				}
 				if( wave_out_result == MMSYSERR_NOERROR )
 				{
 					// Allocate 2 output buffers.
@@ -2186,6 +2278,7 @@ int main( int argc, char **argv )
 						// WaveOut is ready to go with 2 output buffers, so don't use SDL_audio.
 						WaveOutBuffersNeeded = 2;
 						sdl_audio = false;
+						userdata.HighRes = high_res;
 						
 						if( screen )
 						{
@@ -2332,7 +2425,7 @@ int main( int argc, char **argv )
 						
 						if( userdata.VolumeLimit )
 						{
-							double db = 6. * log2(userdata.VolumeLimit);
+							float db = 6. * log2(userdata.VolumeLimit);
 							snprintf( visualizer_message, 128, "Clipping Limit: +%.0fdB\n", db );
 						}
 						else
@@ -2565,7 +2658,7 @@ int main( int argc, char **argv )
 							{
 								userdata.EQ->FreqScale.clear();
 								userdata.EQ->FreqScale[    32. ] = 1.;
-								userdata.EQ->FreqScale[    64. ] = 1.;
+								userdata.EQ->FreqScale[    64. ] = was_flat ? pow( 2.,  1./6. ) : 1.;
 								userdata.EQ->FreqScale[   125. ] = 1.;
 								userdata.EQ->FreqScale[   250. ] = 1.;
 								userdata.EQ->FreqScale[   500. ] = 1.;
@@ -2597,9 +2690,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 32. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 32. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 32. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 32Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2611,9 +2704,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 64. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 64. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 64. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 64Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2625,9 +2718,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 125. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 125. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 125. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 125Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2639,9 +2732,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 250. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 250. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 250. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 250Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2653,9 +2746,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 500. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 500. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 500. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 500Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2667,9 +2760,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 1000. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 1000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 1000. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 1KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2681,9 +2774,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 2000. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 2000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 2000. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 2KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2695,9 +2788,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 4000. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 4000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 4000. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 4KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2709,9 +2802,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 8000. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 8000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 8000. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 8KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2723,9 +2816,9 @@ int main( int argc, char **argv )
 						if( ! userdata.EQ )
 							userdata.EQ = disabled_eq;
 						
-						double scale = userdata.EQ->GetScale( 16000. ) * pow( 2., shift ? -1./6. : 1./6. );
+						float scale = userdata.EQ->GetScale( 16000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 16000. ] = scale;
-						double db = 6. * log2(scale);
+						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 16KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
@@ -2765,7 +2858,8 @@ int main( int argc, char **argv )
 		if( userdata.Buffer.BufferSize )
 		{
 			// Add some data to the playback buffer.
-			userdata.Buffer.AddToBuffer( &userdata, 16384 );
+			size_t data_to_add = 4096 * userdata.Spec.channels * (userdata.HighRes ? sizeof(float) : sizeof(Sint16));
+			userdata.Buffer.AddToBuffer( &userdata, data_to_add );
 		}
 		
 		// Wait 10ms.
@@ -2945,8 +3039,7 @@ int main( int argc, char **argv )
 				{
 					for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
 					{
-						Sint16 raw = ((Sint16*)( userdata.VisualizerBuffer ))[ (visualizer_start_sample + (x * userdata.Spec.channels) + ch) % (userdata.VisualizerBufferSize / 2) ];
-						float amplitude = (raw / 32767.f) * userdata.VisualizerAmpScale();
+						float amplitude = userdata.VisualizerSample( visualizer_start_sample + (x * userdata.Spec.channels) + ch );
 						int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
 						pixels[ y * screen->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 					}
@@ -2962,9 +3055,8 @@ int main( int argc, char **argv )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
-					float scale = userdata.VisualizerAmpScale() / 32768.f;
 					for( int i = 0; i < frames; i ++ )
-						visualizer_fft_complex[ i ].re = ((Sint16*)( userdata.VisualizerBuffer ))[ visualizer_start_sample + (i * userdata.Spec.channels) + ch ] * scale;
+						visualizer_fft_complex[ i ].re = userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 					int offset = 0;
@@ -2999,10 +3091,9 @@ int main( int argc, char **argv )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
-					float scale = userdata.VisualizerAmpScale() / 32768.f;
 					for( int i = 0; i < frames; i ++ )
 						for( int in_ch = ch; in_ch < userdata.Spec.channels; in_ch += 2 )
-							visualizer_fft_complex[ i ].re += ((Sint16*)( userdata.VisualizerBuffer ))[ visualizer_start_sample + (i * userdata.Spec.channels) + in_ch ] * scale;
+							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + in_ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 				}
@@ -3054,10 +3145,9 @@ int main( int argc, char **argv )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
-					float scale = userdata.VisualizerAmpScale() / 32768.f;
 					for( int i = 0; i < frames; i ++ )
 						for( int in_ch = ch; in_ch < userdata.Spec.channels; in_ch += 2 )
-							visualizer_fft_complex[ i ].re += ((Sint16*)( userdata.VisualizerBuffer ))[ visualizer_start_sample + (i * userdata.Spec.channels) + in_ch ] * scale;
+							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + in_ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 				}

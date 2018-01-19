@@ -17,6 +17,7 @@ public:
 	uint8_t *Data;
 	size_t Allocated, Size;
 	size_t Channels, SampleRate, BytesPerSample;
+	AVSampleFormat SampleFormat;
 	std::map<std::string,std::string> Tags;
 	
 	AudioFile( const char *filename = NULL, volatile bool *running_ptr = NULL );

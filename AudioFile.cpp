@@ -28,6 +28,7 @@ void AudioFile::Clear( void )
 	Channels = 1;
 	SampleRate = 44100;
 	BytesPerSample = 2;
+	SampleFormat = AV_SAMPLE_FMT_S16;
 	
 	fmt_ctx = NULL;
 	audio_dec_ctx = NULL;
@@ -121,8 +122,21 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 		goto end;
 	}
 	
-	// We want interleaved 16-bit in the original channel layout and sample rate.
-	if( audio_dec_ctx->sample_fmt != AV_SAMPLE_FMT_S16 )
+	// If it's 16-bit keep it that way, otherwise convert to float.
+	if( (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_S16)
+	||  (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_S16P) )
+	{
+		BytesPerSample = 2;
+		SampleFormat = AV_SAMPLE_FMT_S16;
+	}
+	else
+	{
+		BytesPerSample = 4;
+		SampleFormat = AV_SAMPLE_FMT_FLT;
+	}
+	
+	// We want interleaved in the original channel layout and sample rate.
+	if( audio_dec_ctx->sample_fmt != SampleFormat )
 	{
 		avr = avresample_alloc_context();
 		av_opt_set_int( avr, "in_channel_layout",  audio_dec_ctx->channel_layout, 0 );
@@ -130,7 +144,7 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 		av_opt_set_int( avr, "in_sample_rate",     audio_dec_ctx->sample_rate,    0 );
 		av_opt_set_int( avr, "out_sample_rate",    audio_dec_ctx->sample_rate,    0 );
 		av_opt_set_int( avr, "in_sample_fmt",      audio_dec_ctx->sample_fmt,     0 );
-		av_opt_set_int( avr, "out_sample_fmt",     AV_SAMPLE_FMT_S16,             0 );
+		av_opt_set_int( avr, "out_sample_fmt",     SampleFormat,                  0 );
 		if( avresample_open(avr) < 0 )
 		{
 			avresample_free( &avr );
@@ -234,10 +248,10 @@ bool AudioFile::DecodePacket( void )
 			
 			if( avr )
 			{
-				// Convert to 16-bit interleaved.
+				// Convert to interleaved.
 				uint8_t *output = NULL;
 				int out_linesize = 0;
-				av_samples_alloc( &output, &out_linesize, audio_dec_ctx->channels, frame->nb_samples, AV_SAMPLE_FMT_S16, 0 );
+				av_samples_alloc( &output, &out_linesize, audio_dec_ctx->channels, frame->nb_samples, SampleFormat, 0 );
 				avresample_convert( avr, &output, 0, frame->nb_samples, frame->data, 0, frame->nb_samples );
 				AddData( output, out_linesize );
 				av_freep( &output );

@@ -1,7 +1,7 @@
 PREFIX = /usr
 CC = $(PREFIX)/bin/g++
 O = 2
-CFLAGS = -O$(O) -march=native -mfpmath=sse -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -pedantic -Wno-narrowing -Wno-deprecated-declarations
+CFLAGS = -O$(O) -march=native -mfpmath=sse -ftree-vectorize -fno-strict-aliasing -flto -Wall -Wextra -Wno-narrowing -Wno-deprecated-declarations
 INC = $(PREFIX)/include $(PREFIX)/include/SDL
 LIB = libSDLmain.a libSDL.so ../local/lib/libavdevice.a ../local/lib/libavformat.a ../local/lib/libavfilter.a ../local/lib/libavcodec.a ../local/lib/libavresample.a ../local/lib/libswscale.a ../local/lib/libavutil.a ../local/lib/libswresample.a libdl.so liblzma.so libbz2.a libz.a
 LIBDIR = $(PREFIX)/lib

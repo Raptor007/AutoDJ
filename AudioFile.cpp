@@ -27,8 +27,8 @@ void AudioFile::Clear( void )
 	
 	Channels = 1;
 	SampleRate = 44100;
-	BytesPerSample = 2;
-	SampleFormat = AV_SAMPLE_FMT_S16;
+	BytesPerSample = 0;
+	SampleFormat = AV_SAMPLE_FMT_NONE;
 	
 	fmt_ctx = NULL;
 	audio_dec_ctx = NULL;
@@ -122,17 +122,14 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 		goto end;
 	}
 	
-	// If it's 16-bit keep it that way, otherwise convert to float.
-	if( (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_S16)
-	||  (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_S16P) )
+	// If we didn't specify a sample format, default to 16-bit or float automatically.
+	if( SampleFormat == AV_SAMPLE_FMT_NONE )
 	{
-		BytesPerSample = 2;
-		SampleFormat = AV_SAMPLE_FMT_S16;
-	}
-	else
-	{
-		BytesPerSample = 4;
-		SampleFormat = AV_SAMPLE_FMT_FLT;
+		if( (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_S16)
+		||  (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_S16P) )
+			SampleFormat = AV_SAMPLE_FMT_S16;
+		else
+			SampleFormat = AV_SAMPLE_FMT_FLT;
 	}
 	
 	// We want interleaved in the original channel layout and sample rate.
@@ -151,6 +148,14 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 			avr = NULL;
 		}
 	}
+	
+	// Keep track of the decoded audio format.
+	BytesPerSample = av_get_bytes_per_sample( avr ? SampleFormat : audio_dec_ctx->sample_fmt );
+	SampleRate = audio_dec_ctx->sample_rate;
+	if( (! avr) && av_sample_fmt_is_planar(audio_dec_ctx->sample_fmt) )
+		Channels = 1;
+	else
+		Channels = audio_dec_ctx->channels;
 	
 	// initialize packet, set data to NULL, let the demuxer fill it
 	av_init_packet( &pkt );
@@ -186,16 +191,6 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 			goto end;
 	}
 	while( got_frame );
-	
-	if( av_sample_fmt_is_planar(audio_dec_ctx->sample_fmt) && ! avr )
-		Channels = 1;
-	else
-		Channels = audio_dec_ctx->channels;
-	
-	SampleRate = audio_dec_ctx->sample_rate;
-	
-	if( ! avr )
-		BytesPerSample = av_get_bytes_per_sample( audio_dec_ctx->sample_fmt );
 	
 	// Get metadata tags.
 	while(( tag = av_dict_get( fmt_ctx->metadata, "", tag, AV_DICT_IGNORE_SUFFIX ) ))
@@ -248,7 +243,7 @@ bool AudioFile::DecodePacket( void )
 			
 			if( avr )
 			{
-				// Convert to interleaved.
+				// Convert to interleaved in our desired sample format.
 				uint8_t *output = NULL;
 				int out_linesize = 0;
 				av_samples_alloc( &output, &out_linesize, audio_dec_ctx->channels, frame->nb_samples, SampleFormat, 0 );

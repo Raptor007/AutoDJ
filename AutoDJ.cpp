@@ -92,6 +92,9 @@ const char *PATH_SEPARATOR = "/";
 // --------------------------------------------------------------------------------------
 
 
+bool AlwaysLoadFloat = false;
+
+
 class Song
 {
 public:
@@ -116,6 +119,9 @@ public:
 		VolumeMax = 1.;
 		VolumeAverage = 0.25;
 		RunningPtr = running_ptr;
+		
+		if( AlwaysLoadFloat )
+			Audio.SampleFormat = AV_SAMPLE_FMT_FLT;
 		
 		if( Audio.Load( filename, RunningPtr ) )
 		{
@@ -1282,6 +1288,11 @@ public:
 		Reverb = NULL;
 	}
 	
+	size_t BytesPerSample( void ) const
+	{
+		return (HighRes ? sizeof(float) : sizeof(Sint16));
+	}
+	
 	void SetMessage( const char *message, int seconds )
 	{
 		snprintf( Message, 128, "%s", message );
@@ -1588,7 +1599,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	
 	size_t samples = len / sizeof(Sint16);
 #ifdef ALLOW_VLA
-	float streamTemp[ samples ];
+	float streamTemp[ ud->HighRes ? 1 : samples ];
 #endif
 
 	float *streamF = NULL;
@@ -2018,9 +2029,9 @@ int main( int argc, char **argv )
 	bool sdl_audio = true;
 	bool buffer1auto = true, buffer2auto = true;
 #ifdef WAVEOUT
-	// Default to WaveOut.
+	// Default to WaveOut floating-point when possible.
 	sdl_audio = false;
-	bool high_res = true;
+	userdata.HighRes = true;
 #endif
 	const char *write = NULL;
 	SDL_AudioSpec want;
@@ -2038,15 +2049,7 @@ int main( int argc, char **argv )
 	{
 		if( strncmp( argv[ i ], "--", 2 ) == 0 )
 		{
-			// -- WaveOut --
-			if( strcasecmp( argv[ i ], "--sdl-audio" ) == 0 )
-				sdl_audio = true;
-#ifdef WAVEOUT
-			else if( strcasecmp( argv[ i ], "--16-bit" ) == 0 )
-				high_res = false;
-#endif
-			// -------------
-			else if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
+			if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
 				window = false;
 			else if( strcasecmp( argv[ i ], "--fullscreen" ) == 0 )
 			{
@@ -2084,7 +2087,20 @@ int main( int argc, char **argv )
 				userdata.CrossfadeOut = userdata.CrossfadeIn;
 			}
 			else if( strncasecmp( argv[ i ], "--volume=", strlen("--volume=") ) == 0 )
-				userdata.Volume = atof( argv[ i ] + strlen("--volume=") );
+			{
+				const char *volume = argv[ i ] + strlen("--volume=");
+				switch( volume[ 0 ] )
+				{
+					case '+':
+						volume ++;
+						// fallthrough
+					case '-':
+						userdata.Volume = pow( 2., atof(volume) / 6. );
+						break;
+					default:
+						userdata.Volume = atof( volume );
+				}
+			}
 			else if( strcasecmp( argv[ i ], "--no-volume-matching" ) == 0 )
 				userdata.VolumeMatching = false;
 			else if( strcasecmp( argv[ i ], "--prevent-clipping" ) == 0 )
@@ -2109,6 +2125,25 @@ int main( int argc, char **argv )
 						eq ++;
 				}
 			}
+			else if( strcasecmp( argv[ i ], "--reverb" ) == 0 )
+			{
+				userdata.Reverb = new ReverbParam();
+				userdata.Reverb->Setup( 44100 );
+			}
+			else if( strncasecmp( argv[ i ], "--reverb=", strlen("--reverb=") ) == 0 )
+			{
+				userdata.Reverb = new ReverbParam();
+				userdata.Reverb->BounceEnergy = atof( argv[ i ] + strlen("--reverb=") );
+				userdata.Reverb->Setup( 44100 );
+			}
+			else if( strcasecmp( argv[ i ], "--sdl-audio" ) == 0 )
+				sdl_audio = true;
+			else if( strcasecmp( argv[ i ], "--16-bit" ) == 0 )
+				userdata.HighRes = false;
+			else if( strcasecmp( argv[ i ], "--float" ) == 0 )
+				userdata.HighRes = true;
+			else if( strcasecmp( argv[ i ], "--load-float" ) == 0 )
+				AlwaysLoadFloat = true;
 			else if( strncasecmp( argv[ i ], "--rate=", strlen("--rate=") ) == 0 )
 				want.freq = atoi( argv[ i ] + strlen("--rate=") );
 			else if( strncasecmp( argv[ i ], "--channels=", strlen("--channels=") ) == 0 )
@@ -2202,15 +2237,9 @@ int main( int argc, char **argv )
 	av_log_set_level( AV_LOG_FATAL );
 	av_register_all();
 	
-	// If not specified, get good buffer sizes for the sample rate.
+	// Automatic buffer1 is number of samples, just based on sample rate.
 	if( buffer1auto )
-	{
-		want.samples = 1;
-		while( want.samples < (want.freq * 0.075) )
-			want.samples <<= 1;
-	}
-	if( buffer2auto )
-		userdata.Buffer.SetSize( want.samples * want.channels * sizeof(Sint16) * 8 );
+		want.samples = 1 << (int) log2(want.freq * 0.095);
 	
 	// Prepare audio output.
 	userdata.Buffer.Callback = AudioCallback;
@@ -2238,7 +2267,7 @@ int main( int argc, char **argv )
 				wfx.nSamplesPerSec = want.freq;
 				wfx.cbSize = 0;
 				MMRESULT wave_out_result = ~MMSYSERR_NOERROR;
-				if( high_res )
+				if( userdata.HighRes )
 				{
 					wfx.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
 					wfx.wBitsPerSample = 32;
@@ -2248,12 +2277,13 @@ int main( int argc, char **argv )
 				}
 				if( wave_out_result != MMSYSERR_NOERROR )
 				{
-					high_res = false;
 					wfx.wFormatTag = WAVE_FORMAT_PCM;
 					wfx.wBitsPerSample = 16;
 					wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
 					wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
 					wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+					if( wave_out_result == MMSYSERR_NOERROR )
+						userdata.HighRes = false;
 				}
 				if( wave_out_result == MMSYSERR_NOERROR )
 				{
@@ -2278,7 +2308,6 @@ int main( int argc, char **argv )
 						// WaveOut is ready to go with 2 output buffers, so don't use SDL_audio.
 						WaveOutBuffersNeeded = 2;
 						sdl_audio = false;
-						userdata.HighRes = high_res;
 						
 						if( screen )
 						{
@@ -2292,20 +2321,27 @@ int main( int argc, char **argv )
 #endif
 		if( sdl_audio )
 		{
+			userdata.HighRes = false;
 			SDL_OpenAudio( &want, &(userdata.Spec) );
 			
 			if( screen )
 			{
-				userdata.VisualizerBufferSize = userdata.Spec.samples * userdata.Spec.channels * 2;
+				userdata.VisualizerBufferSize = userdata.Spec.samples * userdata.Spec.channels * userdata.BytesPerSample();
 				userdata.VisualizerBuffer = (Uint8*) malloc( userdata.VisualizerBufferSize );
 			}
 		}
 	}
 	
+	size_t bytes_per_sample = userdata.BytesPerSample();
+	
+	// Automatic buffer2 is number of bytes, based on data rate.
+	if( buffer2auto )
+		userdata.Buffer.SetSize( 4 * userdata.Spec.samples * userdata.Spec.channels * bytes_per_sample );
+	
 	if( write )
 	{
 		// Write WAV header.
-		unsigned char wave_header[ 44 ] = { 'R','I','F','F', 36,0xFF,0xFF,0x7F, 'W','A','V','E', 'f','m','t',0x20, 16,0,0,0, 1,0, userdata.Spec.channels,0, userdata.Spec.freq%256,userdata.Spec.freq/256,0,0, (userdata.Spec.freq*userdata.Spec.channels*2)%256,(userdata.Spec.freq*userdata.Spec.channels*2)/256,0,0, 4,0, 16,0, 'd','a','t','a', 0,0xFF,0xFF,0x7F };
+		unsigned char wave_header[ 44 ] = { 'R','I','F','F', 36,0xFF,0xFF,0x7F, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, (userdata.HighRes?3:1),0, userdata.Spec.channels,0, userdata.Spec.freq%256,userdata.Spec.freq/256,0,0, (userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)%256,(userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)/256,0,0, userdata.Spec.channels*bytes_per_sample,0, 8*bytes_per_sample,0, 'd','a','t','a', 0,0xFF,0xFF,0x7F };
 		userdata.WriteTo = fopen( write, "wb" );
 		fwrite( wave_header, 1, 44, userdata.WriteTo );
 		fflush( userdata.WriteTo );
@@ -2340,8 +2376,8 @@ int main( int argc, char **argv )
 	size_t visualizer_loading_frame = 0;
 	int visualizer_color1 = 6, visualizer_color2 = 4, visualizer_text_color = 0;
 	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 2, 3, 3, 1 };
-	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * 2);
-	int visualizer_fft_frames = visualizer_frames / 4;
+	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * bytes_per_sample);
+	int visualizer_fft_frames = std::min<int>( visualizer_frames, 1 << (int) log2(userdata.Spec.freq * 0.095 / 4.) );
 	FFTContext *visualizer_fft_context = av_fft_init( log2(visualizer_fft_frames), false );
 	FFTComplex *visualizer_fft_complex_l = (FFTComplex*) av_mallocz( visualizer_fft_frames * sizeof(FFTComplex) );
 	FFTComplex *visualizer_fft_complex_r = (FFTComplex*) av_mallocz( visualizer_fft_frames * sizeof(FFTComplex) );
@@ -2390,16 +2426,18 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_MINUS )
 					{
-						userdata.Volume -= 0.0625;
-						snprintf( visualizer_message, 128, "Volume: %.0f%%\n", userdata.Volume * 100. );
+						userdata.Volume *= pow( 2., shift ? -3./6. : -1./6. );
+						float db = 6. * log2(userdata.Volume);
+						snprintf( visualizer_message, 128, "Volume: %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
 					else if( key == SDLK_EQUALS )
 					{
-						userdata.Volume += 0.0625;
-						snprintf( visualizer_message, 128, "Volume: %.0f%%\n", userdata.Volume * 100. );
+						userdata.Volume *= pow( 2., shift ? 3./6. : 1./6. );
+						float db = 6. * log2(userdata.Volume);
+						snprintf( visualizer_message, 128, "Volume: %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );
@@ -2855,12 +2893,9 @@ int main( int argc, char **argv )
 			}
 		}
 		
+		// Keep the playback buffer full.
 		if( userdata.Buffer.BufferSize )
-		{
-			// Add some data to the playback buffer.
-			size_t data_to_add = 4096 * userdata.Spec.channels * (userdata.HighRes ? sizeof(float) : sizeof(Sint16));
-			userdata.Buffer.AddToBuffer( &userdata, data_to_add );
-		}
+			userdata.Buffer.AddToBuffer( &userdata, userdata.Buffer.BufferSize );
 		
 		// Wait 10ms.
 		SDL_Delay( 10 );
@@ -2884,7 +2919,7 @@ int main( int argc, char **argv )
 					size_t frames = userdata.Spec.freq * (now - visualizer_prev_clock) / (double) CLOCKS_PER_SEC;
 					visualizer_prev_clock = now;
 					visualizer_start_sample += userdata.Spec.channels * frames;
-					visualizer_start_sample %= userdata.VisualizerBufferSize / (userdata.Spec.channels * 2);
+					visualizer_start_sample %= userdata.VisualizerBufferSize / (userdata.Spec.channels * userdata.BytesPerSample());
 				}
 			}
 			else

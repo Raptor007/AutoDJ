@@ -37,16 +37,6 @@ class ReverbParam;
 class Reverb;
 class UserData;
 
-namespace ResampleMethod
-{
-	enum
-	{
-		Auto = 0,
-		Nearest,
-		Cubic
-	};
-}
-
 #define VISUALIZERS            5
 #define VISUALIZER_COLORS      8
 #define VISUALIZER_BACKGROUNDS 4
@@ -1223,7 +1213,6 @@ public:
 	double BPM;
 	bool SourceBPM;
 	double SourcePitchScale;
-	uint8_t Resample;
 	int CrossfadeIn;
 	int CrossfadeOut;
 	float Volume;
@@ -1261,7 +1250,6 @@ public:
 		BPM = 140.;
 		SourceBPM = true;
 		SourcePitchScale = 1.;
-		Resample = ResampleMethod::Auto;
 		CrossfadeIn = 96;
 		CrossfadeOut = 128;
 		Volume = 1.;
@@ -1676,7 +1664,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		{
 			// Not crossfading yet.
 			
-			if( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) )
+			if( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.05) )
 			{
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 					streamF[ i + channel ] = current_song->NearestFrame( channel ) * volume;
@@ -1696,8 +1684,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			if( ud->SourceBPM )
 				bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
 			
-			bool a_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(current_song->BPM - bpm) < 0.05)) );
-			bool b_nearest = ( (ud->Resample == ResampleMethod::Nearest) || ((ud->Resample == ResampleMethod::Auto) && (fabs(next_song->BPM - bpm) < 0.05)) );
+			bool a_nearest = ( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.05) );
+			bool b_nearest = ( ((size_t) ud->Spec.freq == next_song->Audio.SampleRate   ) && (fabs(next_song->BPM    - bpm) < 0.05) );
 			
 			for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 			{
@@ -2013,6 +2001,43 @@ void WaveOutCheck( UserData *ud )
 }
 
 #endif
+
+
+// --------------------------------------------------------------------------------------
+
+
+void UpdatePlayback( UserData *ud )
+{
+	if( ud->Buffer.BufferSize )
+		ud->Buffer.AddToBuffer( ud, ud->Buffer.BufferSize );
+	
+#ifdef WAVEOUT
+	WaveOutCheck( ud );
+#endif
+}
+
+
+int PlaybackThread( void *userdata )
+{
+	UserData *ud = (UserData*) userdata;
+	
+	// Try to check about twice per playback buffer.
+	size_t iter_ms = ud->Spec.samples * 500 / ud->Spec.freq;
+	clock_t prev = clock();
+	
+	while( ud->Running )
+	{
+		UpdatePlayback( ud );
+		
+		// Sleep dynamically based on how long audio processing is taking.
+		clock_t now = clock();
+		double elapsed = (now - prev) / (double) CLOCKS_PER_SEC;
+		prev = now;
+		SDL_Delay( std::max<int>( 1, iter_ms - (int)(elapsed*1000) ) );
+	}
+	
+	return 0;
+}
 
 
 // --------------------------------------------------------------------------------------
@@ -2388,6 +2413,7 @@ int main( int argc, char **argv )
 	
 	// Keep running until playback is complete.
 	userdata.Running = (userdata.Queue.size() || userdata.Songs.size());
+	SDL_Thread *playback_thread = SDL_CreateThread( &PlaybackThread, &userdata );
 	while( userdata.Running )
 	{
 		size_t prev_song_count = userdata.Songs.size();
@@ -2893,9 +2919,9 @@ int main( int argc, char **argv )
 			}
 		}
 		
-		// Keep the playback buffer full.
-		if( userdata.Buffer.BufferSize )
-			userdata.Buffer.AddToBuffer( &userdata, userdata.Buffer.BufferSize );
+		// If the main thread is handling playback, do that now.
+		if( ! playback_thread )
+			UpdatePlayback( &userdata );
 		
 		// Wait 10ms.
 		SDL_Delay( 10 );
@@ -3302,10 +3328,6 @@ int main( int argc, char **argv )
 			Uint8 buffer[ 1024*1024 ];
 			want.callback( (void*) &userdata, buffer, 1024*1024 );
 		}
-#ifdef WAVEOUT
-		else if( ! sdl_audio )
-			WaveOutCheck( &userdata );
-#endif
 		
 		userdata.Running = userdata.Running && (userdata.Queue.size() || userdata.Songs.size() || userdata.Buffer.Buffered);
 	}

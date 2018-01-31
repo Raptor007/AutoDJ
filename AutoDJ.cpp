@@ -38,7 +38,7 @@ class Reverb;
 class UserData;
 
 #define VISUALIZERS            5
-#define VISUALIZER_COLORS      8
+#define VISUALIZER_COLORS     10
 #define VISUALIZER_BACKGROUNDS 4
 
 int SongLoaderThread( void *data_ptr );
@@ -1558,6 +1558,10 @@ bool CalculateCrossfade( const Song *current_song, const Song *next_song, double
 		*crossfade_at_beat = (fabs( actual_beat - expected_beat ) < 32.) ? actual_beat : expected_beat;
 	}
 	
+	// Sanity check to avoid something strange like negative crossfade.
+	if( *crossfade_at_beat > current_total_beats )
+		*crossfade_at_beat = current_total_beats;
+	
 	// Make sure the current song doesn't end before the cross-fade is complete.
 	if( *crossfade_for_beats > current_total_beats - *crossfade_at_beat )
 		*crossfade_for_beats = current_total_beats - *crossfade_at_beat;
@@ -1664,7 +1668,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		{
 			// Not crossfading yet.
 			
-			if( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.05) )
+			if( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.01) )
 			{
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 					streamF[ i + channel ] = current_song->NearestFrame( channel ) * volume;
@@ -1684,8 +1688,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			if( ud->SourceBPM )
 				bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
 			
-			bool a_nearest = ( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.05) );
-			bool b_nearest = ( ((size_t) ud->Spec.freq == next_song->Audio.SampleRate   ) && (fabs(next_song->BPM    - bpm) < 0.05) );
+			bool a_nearest = ( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.01) );
+			bool b_nearest = ( ((size_t) ud->Spec.freq == next_song->Audio.SampleRate   ) && (fabs(next_song->BPM    - bpm) < 0.01) );
 			
 			for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 			{
@@ -2008,7 +2012,7 @@ void WaveOutCheck( UserData *ud )
 
 void UpdatePlayback( UserData *ud )
 {
-	if( ud->Buffer.BufferSize )
+	if( ud->Buffer.Unfilled() )
 		ud->Buffer.AddToBuffer( ud, ud->Buffer.BufferSize );
 	
 #ifdef WAVEOUT
@@ -2021,22 +2025,72 @@ int PlaybackThread( void *userdata )
 {
 	UserData *ud = (UserData*) userdata;
 	
-	// Try to check about twice per playback buffer.
-	size_t iter_ms = ud->Spec.samples * 500 / ud->Spec.freq;
-	clock_t prev = clock();
-	
 	while( ud->Running )
 	{
 		UpdatePlayback( ud );
-		
-		// Sleep dynamically based on how long audio processing is taking.
-		clock_t now = clock();
-		double elapsed = (now - prev) / (double) CLOCKS_PER_SEC;
-		prev = now;
-		SDL_Delay( std::max<int>( 1, iter_ms - (int)(elapsed*1000) ) );
+		SDL_Delay( 1 );
 	}
 	
 	return 0;
+}
+
+
+// --------------------------------------------------------------------------------------
+
+
+Uint32 cycle_color( double cycle, const SDL_PixelFormat *format )
+{
+	double unused = 0.;
+	cycle = modf( cycle, &unused );
+	double leg = cycle * 8.;
+	double along = modf( leg, &unused );
+	Uint8 r = 0xFF, g = 0x00, b = 0x00;
+	
+	switch( (int) leg )
+	{
+		case 0: // Red to Yellow
+			r = 255;
+			g = along * 255. + 0.5;
+			b = 0;
+			break;
+		case 1: // Yellow
+			r = 255;
+			g = 255;
+			b = 0;
+			break;
+		case 2: // Yellow to Green
+			r = (1. - along) * 255. + 0.5;
+			g = 255;
+			b = 0;
+			break;
+		case 3: // Green
+			r = 0;
+			g = 255;
+			b = 0;
+			break;
+		case 4: // Green to Cyan
+			r = 0;
+			g = 255;
+			b = along * 255. + 0.5;
+			break;
+		case 5: // Cyan to White
+			r = along * 255. + 0.5;
+			g = 255;
+			b = 255;
+			break;
+		case 6: // White to Magenta
+			r = 255;
+			g = (1. - along) * 255. + 0.5;
+			b = 255;
+			break;
+		case 7: // Magenta to Red
+			r = 255;
+			g = 0;
+			b = (1. - along) * 255. + 0.5;
+			break;
+	}
+	
+	return SDL_MapRGB( format, r, g, b );
 }
 
 
@@ -2049,6 +2103,11 @@ int main( int argc, char **argv )
 	UserData userdata;
 	bool window = true;
 	bool fullscreen = false;
+	bool resize = false;
+#ifdef WIN32
+	resize = true;
+#endif
+	int zoom = 1;
 	int visualizer = 2;
 	bool playback = true;
 	bool sdl_audio = true;
@@ -2058,6 +2117,7 @@ int main( int argc, char **argv )
 	sdl_audio = false;
 	userdata.HighRes = true;
 #endif
+	int visualizer_color1 = 6, visualizer_color2 = 4, visualizer_text_color = 0;
 	const char *write = NULL;
 	SDL_AudioSpec want;
 	memset( &want, 0, sizeof(want) );
@@ -2077,12 +2137,21 @@ int main( int argc, char **argv )
 			if( strcasecmp( argv[ i ], "--no-window" ) == 0 )
 				window = false;
 			else if( strcasecmp( argv[ i ], "--fullscreen" ) == 0 )
-			{
-				window = true;
 				fullscreen = true;
-			}
+			else if( strcasecmp( argv[ i ], "--resize" ) == 0 )
+				resize = true;
+			else if( strcasecmp( argv[ i ], "--no-resize" ) == 0 )
+				resize = false;
+			else if( strncasecmp( argv[ i ], "--zoom=", strlen("--zoom=") ) == 0 )
+				zoom = std::max<int>( 1, atoi( argv[ i ] + strlen("--zoom=") ) );
 			else if( strncasecmp( argv[ i ], "--visualizer=", strlen("--visualizer=") ) == 0 )
 				visualizer = atoi( argv[ i ] + strlen("--visualizer=") );
+			else if( strcasecmp( argv[ i ], "--rainbow" ) == 0 )
+			{
+				visualizer_color1 = 8;
+				visualizer_color2 = 9;
+				visualizer_text_color = 8;
+			}
 			else if( strcasecmp( argv[ i ], "--no-shuffle" ) == 0 )
 				userdata.Shuffle = false;
 			else if( strcasecmp( argv[ i ], "--no-repeat" ) == 0 )
@@ -2255,7 +2324,7 @@ int main( int argc, char **argv )
 	if( window )
 	{
 		SDL_WM_SetCaption( "Raptor007's AutoDJ", "AutoDJ" );
-		screen = fullscreen ? SDL_SetVideoMode( 0, 0, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE );
+		screen = fullscreen ? SDL_SetVideoMode( 0, 0, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256*zoom, 64*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 	}
 	
 	// Prepare audio file input.
@@ -2396,10 +2465,14 @@ int main( int argc, char **argv )
 		disabled_reverb = new ReverbParam();
 	
 	// Visualizer variables.
+	SDL_Surface *drawto = screen;
+	if( zoom > 1 )
+		drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+zoom-1)/zoom, (screen->h+zoom-1)/zoom, screen->format->BitsPerPixel,
+			screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
 	clock_t visualizer_updated_clock = 0, visualizer_prev_clock = 0;
 	size_t visualizer_start_sample = 0;
 	size_t visualizer_loading_frame = 0;
-	int visualizer_color1 = 6, visualizer_color2 = 4, visualizer_text_color = 0;
+	int visualizer_color_cycle = 128;
 	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 2, 3, 3, 1 };
 	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * bytes_per_sample);
 	int visualizer_fft_frames = std::min<int>( visualizer_frames, 1 << (int) log2(userdata.Spec.freq * 0.095 / 4.) );
@@ -2434,6 +2507,23 @@ int main( int argc, char **argv )
 					if( sdl_audio )
 						SDL_PauseAudio( 1 );
 				}
+				else if( event.type == SDL_VIDEORESIZE )
+				{
+					if( (event.resize.w != screen->w) || (event.resize.h != screen->h) )
+					{
+						int scale = std::max<int>( 1, screen->w / drawto->w );
+						SDL_FreeSurface( screen );
+						screen = SDL_SetVideoMode( (event.resize.w/scale)*scale, (event.resize.h/scale)*scale, 0, SDL_SWSURFACE | SDL_RESIZABLE );
+						if( scale <= 1 )
+							drawto = screen;
+						else
+						{
+							SDL_FreeSurface( drawto );
+							drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, screen->w/scale, screen->h/scale, screen->format->BitsPerPixel,
+								screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+						}
+					}
+				}
 				else if( event.type == SDL_KEYDOWN )
 				{
 					SDLKey key = event.key.keysym.sym;
@@ -2449,6 +2539,49 @@ int main( int argc, char **argv )
 						userdata.Playing = ! userdata.Playing;
 						if( sdl_audio )
 							SDL_PauseAudio( userdata.Playing ? 0 : 1 );
+					}
+					else if( key == SDLK_PAGEUP )
+					{
+						int scale = (screen->w / drawto->w) + 1;
+						if( ! fullscreen )
+						{
+							if( screen == drawto )
+							{
+								drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, screen->w, screen->h, screen->format->BitsPerPixel,
+									screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+							}
+							SDL_FreeSurface( screen );
+							screen = SDL_SetVideoMode( drawto->w*scale, drawto->h*scale, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+						}
+						else
+						{
+							SDL_FreeSurface( drawto );
+							drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+scale-1)/scale, (screen->h+scale-1)/scale, screen->format->BitsPerPixel,
+								screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+						}
+					}
+					else if( key == SDLK_PAGEDOWN )
+					{
+						int scale = (screen->w / drawto->w) - 1;
+						if( scale >= 1 )
+						{
+							if( ! fullscreen )
+							{
+								SDL_FreeSurface( screen );
+								screen = SDL_SetVideoMode( drawto->w*scale, drawto->h*scale, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+							}
+							if( scale == 1 )
+							{
+								SDL_FreeSurface( drawto );
+								drawto = screen;
+							}
+							else if( fullscreen )
+							{
+								SDL_FreeSurface( drawto );
+								drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+scale-1)/scale, (screen->h+scale-1)/scale, screen->format->BitsPerPixel,
+									screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+							}
+						}
 					}
 					else if( key == SDLK_MINUS )
 					{
@@ -2529,12 +2662,18 @@ int main( int argc, char **argv )
 								current_song->FirstOutroFrame = current_song->FrameAtBeat( (fabs( actual_beat - expected_beat ) < 32.) ? actual_beat : expected_beat );
 								current_song->OutroBeats = std::min<int>( 64, current_song->TotalBeats() - beat );
 							}
+							if( userdata.Songs.size() < 2 )
+								userdata.SetMessage( "Loading...", 4 );
 						}
 					}
 					else if( key == SDLK_BACKSLASH )
 					{
 						if( userdata.Songs.size() )
-							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
+						{
+							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames - 2;
+							if( userdata.Songs.size() < 2 )
+								userdata.SetMessage( "Loading...", 4 );
+						}
 					}
 					else if( key == SDLK_k )
 					{
@@ -2668,8 +2807,8 @@ int main( int argc, char **argv )
 						if( screen && ! visualizer )
 						{
 							Uint32 bg = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
-							Uint32* pixels = (Uint32*) screen->pixels;
 							SDL_LockSurface( screen );
+							Uint32* pixels = (Uint32*) screen->pixels;
 							for( int x = 0; x < screen->w; x ++ )
 							{
 								for( int y = 0; y < screen->h; y ++ )
@@ -2679,18 +2818,34 @@ int main( int argc, char **argv )
 							SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
 						}
 					}
+					else if( key == SDLK_f )
+					{
+						if( shift )
+							visualizer_color1 += VISUALIZER_COLORS - 1;
+						else
+							visualizer_color1 ++;
+						visualizer_color1 %= VISUALIZER_COLORS;
+					}
+					else if( key == SDLK_g )
+					{
+						if( shift )
+							visualizer_color2 += VISUALIZER_COLORS - 1;
+						else
+							visualizer_color2 ++;
+						visualizer_color2 %= VISUALIZER_COLORS;
+					}
 					else if( key == SDLK_c )
 					{
-						int visualizer_colors = visualizer_color1 * VISUALIZER_COLORS + (visualizer_color2 - visualizer_color1 + VISUALIZER_COLORS) % VISUALIZER_COLORS;
 						if( ! shift )
-							visualizer_colors ++;
+							visualizer_color_cycle /= 2;
 						else
-							visualizer_colors += VISUALIZER_COLORS * VISUALIZER_COLORS - 1;
-						visualizer_colors %= VISUALIZER_COLORS * VISUALIZER_COLORS;
-						visualizer_color1 = visualizer_colors / VISUALIZER_COLORS;
-						visualizer_color2 = (visualizer_color1 + visualizer_colors % VISUALIZER_COLORS) % VISUALIZER_COLORS;
+							visualizer_color_cycle *= 2;
+						if( visualizer_color_cycle < 32 )
+							visualizer_color_cycle = 512;
+						else if( visualizer_color_cycle > 512 )
+							visualizer_color_cycle = 32;
 					}
-					else if( key == SDLK_f )
+					else if( key == SDLK_d )
 					{
 						if( ! shift )
 							visualizer_text_color ++;
@@ -2926,8 +3081,17 @@ int main( int argc, char **argv )
 		// Wait 10ms.
 		SDL_Delay( 10 );
 		
+		// Prepare to draw.
+		Uint32* pixels = NULL;
+		if( screen && drawto )
+		{
+			if( screen == drawto )
+				SDL_LockSurface( screen );
+			pixels = (Uint32*) drawto->pixels;
+		}
+		
 		// Visualize the waveform in the window.
-		if( visualizer && screen && (userdata.Playing || userdata.Songs.empty()) )
+		if( pixels && visualizer && (userdata.Playing || userdata.Songs.empty()) )
 		{
 			clock_t now = clock();
 			
@@ -2951,7 +3115,7 @@ int main( int argc, char **argv )
 			else
 			{
 				visualizer_loading_frame ++;
-				visualizer_loading_frame %= screen->h;
+				visualizer_loading_frame %= drawto->h;
 				visualizer_prev_clock = now;
 			}
 			
@@ -2964,10 +3128,12 @@ int main( int argc, char **argv )
 			colors[ 5 ] = SDL_MapRGB( screen->format, 0xFF, 0x80, 0x00 ); // Orange to Red
 			colors[ 6 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 ); // Yellow to Red
 			colors[ 7 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 ); // Green
-			Uint32* pixels = (Uint32*) screen->pixels;
-			SDL_LockSurface( screen );
-			font1.SetTarget( (uint32_t*) screen->pixels, screen->w, screen->h );
-			font2.SetTarget( (uint32_t*) screen->pixels, screen->w, screen->h );
+			double cycle = (now / (double) CLOCKS_PER_SEC) * (userdata.BPM / 60.) / (double) visualizer_color_cycle;
+			colors[ 8 ] = cycle_color( cycle, screen->format );
+			colors[ 9 ] = cycle_color( cycle - 0.03125, screen->format );
+			
+			font1.SetTarget( pixels, drawto->w, drawto->h );
+			font2.SetTarget( pixels, drawto->w, drawto->h );
 			
 			#define FADE_R(r,g,b) (std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ))
 			#define FADE_G(r,g,b) (std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ))
@@ -2976,31 +3142,31 @@ int main( int argc, char **argv )
 			if( (visualizer_backgrounds[ visualizer ] == 0) || ! userdata.Playing )
 			{
 				// Fade in-place.
-				for( int x = 0; x < screen->w; x ++ )
+				for( int x = 0; x < drawto->w; x ++ )
 				{
-					for( int y = 0; y < screen->h; y ++ )
+					for( int y = 0; y < drawto->h; y ++ )
 					{
 						Uint8 r = 0x00, g = 0x00, b = 0x00;
-						SDL_GetRGB( pixels[ y * screen->w + x ], screen->format, &r, &g, &b );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+						SDL_GetRGB( pixels[ y * drawto->w + x ], screen->format, &r, &g, &b );
+						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 					}
 				}
 			}
 			else if( visualizer_backgrounds[ visualizer ] == 1 )
 			{
 				// Fade downward.
-				for( int x = 0; x < screen->w; x ++ )
+				for( int x = 0; x < drawto->w; x ++ )
 				{
 					Uint8 r = 0x00, g = 0x00, b = 0x00;
-					for( int y = screen->h - 1; y >= 1; y -- )
+					for( int y = drawto->h - 1; y >= 1; y -- )
 					{
 						Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00;
-						SDL_GetRGB( pixels[  y    * screen->w + x ], screen->format, &r1, &g1, &b1 );
-						SDL_GetRGB( pixels[ (y-1) * screen->w + x ], screen->format, &r2, &g2, &b2 );
+						SDL_GetRGB( pixels[  y    * drawto->w + x ], screen->format, &r1, &g1, &b1 );
+						SDL_GetRGB( pixels[ (y-1) * drawto->w + x ], screen->format, &r2, &g2, &b2 );
 						r = std::max<Uint8>( r1, r2 );
 						g = std::max<Uint8>( g1, g2 );
 						b = std::max<Uint8>( b1, b2 );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 					}
 					SDL_GetRGB( pixels[ x ], screen->format, &r, &g, &b );
 					pixels[ x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
@@ -3009,31 +3175,31 @@ int main( int argc, char **argv )
 			else if( visualizer_backgrounds[ visualizer ] == 2 )
 			{
 				// Fade outward.
-				for( int x = 0; x < screen->w / 2; x ++ )
+				for( int x = 0; x < (drawto->w + 1) / 2; x ++ )
 				{
 					Uint8 r = 0x00, g = 0x00, b = 0x00;
-					for( int y = 0; y < screen->h / 2; y ++ )
+					for( int y = 0; y < (drawto->h + 1) / 2; y ++ )
 					{
 						for( int q = 0; q < 4; q ++ )
 						{
 							int x1 = x, y1 = y, dx = 1, dy = 1;
 							if( q >= 2 )
 							{
-								x1 = screen->w - x - 1;
+								x1 = drawto->w - x - 1;
 								dx = -1;
 							}
 							if( q % 2 )
 							{
-								y1 = screen->h - y - 1;
+								y1 = drawto->h - y - 1;
 								dy = -1;
 							}
 							Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00;
-							SDL_GetRGB( pixels[  y1     * screen->w + x1    ], screen->format, &r1, &g1, &b1 );
-							SDL_GetRGB( pixels[ (y1+dy) * screen->w + x1+dx ], screen->format, &r2, &g2, &b2 );
+							SDL_GetRGB( pixels[  y1     * drawto->w + x1    ], screen->format, &r1, &g1, &b1 );
+							SDL_GetRGB( pixels[ (y1+dy) * drawto->w + x1+dx ], screen->format, &r2, &g2, &b2 );
 							r = std::max<Uint8>( r1, r2 );
 							g = std::max<Uint8>( g1, g2 );
 							b = std::max<Uint8>( b1, b2 );
-							pixels[ y1 * screen->w + x1 ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+							pixels[ y1 * drawto->w + x1 ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 						}
 					}
 				}
@@ -3043,40 +3209,40 @@ int main( int argc, char **argv )
 				// Fade in all directions.
 				Uint8 r = 0x00, g = 0x00, b = 0x00;
 				Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00, r3 = 0x00, g3 = 0x00, b3 = 0x00;
-				for( int y = 0; y < screen->h; y ++ )
+				for( int y = 0; y < drawto->h; y ++ )
 				{
 					r2 = 0x00; g2 = 0x00; b2 = 0x00;
-					SDL_GetRGB( pixels[ y * screen->w ], screen->format, &r3, &g3, &b3 );
-					for( int x = 0; x < screen->w; x ++ )
+					SDL_GetRGB( pixels[ y * drawto->w ], screen->format, &r3, &g3, &b3 );
+					for( int x = 0; x < drawto->w; x ++ )
 					{
 						r1 = r2; g1 = g2; b1 = b2;
 						r2 = r3; g2 = g3; b2 = b3;
-						if( x + 1 < screen->w )
-							SDL_GetRGB( pixels[ y * screen->w + (x+1) ], screen->format, &r3, &g3, &b3 );
+						if( x + 1 < drawto->w )
+							SDL_GetRGB( pixels[ y * drawto->w + (x+1) ], screen->format, &r3, &g3, &b3 );
 						else
 							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
 						r = std::max<Uint8>( std::max<Uint8>( FADE_R(r1,g1,b1), r2 ), FADE_R(r3,g3,b3) );
 						g = std::max<Uint8>( std::max<Uint8>( FADE_G(r1,g1,b1), g2 ), FADE_G(r3,g3,b3) );
 						b = std::max<Uint8>( std::max<Uint8>( FADE_B(r1,g1,b1), b2 ), FADE_B(r3,g3,b3) );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, r, g, b );
+						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, r, g, b );
 					}
 				}
-				for( int x = 0; x < screen->w; x ++ )
+				for( int x = 0; x < drawto->w; x ++ )
 				{
 					r2 = 0x00; g2 = 0x00; b2 = 0x00;
 					SDL_GetRGB( pixels[ x ], screen->format, &r3, &g3, &b3 );
-					for( int y = 0; y < screen->h; y ++ )
+					for( int y = 0; y < drawto->h; y ++ )
 					{
 						r1 = r2; g1 = g2; b1 = b2;
 						r2 = r3; g2 = g3; b2 = b3;
-						if( y + 1 < screen->h )
-							SDL_GetRGB( pixels[ (y+1) * screen->w + x ], screen->format, &r3, &g3, &b3 );
+						if( y + 1 < drawto->h )
+							SDL_GetRGB( pixels[ (y+1) * drawto->w + x ], screen->format, &r3, &g3, &b3 );
 						else
 							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
 						r = std::max<Uint8>( std::max<Uint8>( r1, r2 ), r3 );
 						g = std::max<Uint8>( std::max<Uint8>( g1, g2 ), g3 );
 						b = std::max<Uint8>( std::max<Uint8>( b1, b2 ), b3 );
-						pixels[ y * screen->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
 					}
 				}
 			}
@@ -3084,25 +3250,25 @@ int main( int argc, char **argv )
 			if( ! userdata.Playing )
 			{
 				// Loading animation.
-				for( int x = 0; x < screen->w; x ++ )
+				for( int x = 0; x < drawto->w; x ++ )
 				{
-					int y1 = ((screen->h - x) % screen->h + screen->h + visualizer_loading_frame) % screen->h;
-					int y2 = (y1 + screen->h / 2) % screen->h;
-					pixels[ y1 * screen->w + x ] = colors[ visualizer_color1 ];
-					pixels[ y2 * screen->w + x ] = colors[ visualizer_color2 ];
+					int y1 = ((drawto->h - x) % drawto->h + drawto->h + visualizer_loading_frame) % drawto->h;
+					int y2 = (y1 + drawto->h / 2) % drawto->h;
+					pixels[ y1 * drawto->w + x ] = colors[ visualizer_color1 ];
+					pixels[ y2 * drawto->w + x ] = colors[ visualizer_color2 ];
 				}
 			}
 			
 			else if( visualizer == 1 )
 			{
 				// Fill in the waveform.
-				for( int x = 0; x < screen->w; x ++ )
+				for( int x = 0; x < drawto->w; x ++ )
 				{
 					for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
 					{
 						float amplitude = userdata.VisualizerSample( visualizer_start_sample + (x * userdata.Spec.channels) + ch );
-						int y = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
-						pixels[ y * screen->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
+						int y = std::max<int>( 0, std::min<int>( drawto->h - 1, drawto->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
+						pixels[ y * drawto->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 					}
 				}
 			}
@@ -3111,7 +3277,7 @@ int main( int argc, char **argv )
 			{
 				// Show spectrum of frequencies.
 				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
-				float base = pow( 2., log2( visualizer_fft_frames/2 ) / (screen->w + visualizer_fft_width_offset) );
+				float base = pow( 2., log2( visualizer_fft_frames/2 ) / (drawto->w + visualizer_fft_width_offset) );
 				for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
@@ -3121,7 +3287,7 @@ int main( int argc, char **argv )
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 					int offset = 0;
-					for( int x = 0; x < screen->w; x ++ )
+					for( int x = 0; x < drawto->w; x ++ )
 					{
 						int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, x ) );
 						int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, x + 1 ) );
@@ -3135,9 +3301,9 @@ int main( int argc, char **argv )
 						for( int band = band_min; band < band_max; band ++ )
 							amplitude += sqrt( visualizer_fft_complex[ band ].re * visualizer_fft_complex[ band ].re + visualizer_fft_complex[ band ].im * visualizer_fft_complex[ band ].im );
 						amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
-						int h = std::max<int>( 0, std::min<int>( screen->h - 1, screen->h * amplitude ) );
-						for( int y = screen->h - 1 - h; y < screen->h; y ++ )
-							pixels[ y * screen->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
+						int h = std::max<int>( 0, std::min<int>( drawto->h - 1, drawto->h * amplitude ) );
+						for( int y = drawto->h - 1 - h; y < drawto->h; y ++ )
+							pixels[ y * drawto->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 					}
 					visualizer_fft_width_offset = offset;
 				}
@@ -3147,7 +3313,7 @@ int main( int argc, char **argv )
 			{
 				// Show left/right spectrum of frequencies.
 				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
-				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (screen->h + visualizer_fft_height_offset) );
+				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (drawto->h + visualizer_fft_height_offset) );
 				for( int ch = (userdata.Spec.channels > 1) ? 1 : 0; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
@@ -3161,7 +3327,7 @@ int main( int argc, char **argv )
 				const FFTComplex *spectrum_l = visualizer_fft_complex_l;
 				const FFTComplex *spectrum_r = (userdata.Spec.channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
 				int offset = 0;
-				for( int y = 0; y < screen->h; y ++ )
+				for( int y = 0; y < drawto->h; y ++ )
 				{
 					int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, y ) );
 					int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, y + 1 ) );
@@ -3188,10 +3354,10 @@ int main( int argc, char **argv )
 						float this_amplitude = (ch % 2) ? amplitude_r : amplitude_l;
 						Uint32 color = (separation * separation * this_amplitude * 2.f > 0.015625f) ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
 						this_amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
-						int h = std::max<int>( 0, std::min<int>( screen->w / 2 - 1, screen->w / 2 * this_amplitude ) );
+						int h = std::max<int>( 0, std::min<int>( drawto->w / 2 - 1, drawto->w / 2 * this_amplitude ) );
 						int dx = (ch % 2) ? 1 : -1;
-						for( int x = screen->w / 2 - (ch+1)%2; (ch % 2) ? (x < screen->w / 2 + h) : (x > screen->w / 2 - h); x += dx )
-							pixels[ (screen->h - y - 1) * screen->w + x ] = color;
+						for( int x = drawto->w / 2 - (ch+1)%2; (ch % 2) ? (x < drawto->w / 2 + h) : (x > drawto->w / 2 - h); x += dx )
+							pixels[ (drawto->h - y - 1) * drawto->w + x ] = color;
 					}
 				}
 				visualizer_fft_height_offset = offset;
@@ -3201,7 +3367,7 @@ int main( int argc, char **argv )
 			{
 				// Show left/right separation of frequencies.
 				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
-				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (screen->h + visualizer_fft_height_offset) );
+				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (drawto->h + visualizer_fft_height_offset) );
 				for( int ch = (userdata.Spec.channels > 1) ? 1 : 0; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
@@ -3215,7 +3381,7 @@ int main( int argc, char **argv )
 				const FFTComplex *spectrum_l = visualizer_fft_complex_l;
 				const FFTComplex *spectrum_r = (userdata.Spec.channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
 				int offset = 0;
-				for( int y = 0; y < screen->h; y ++ )
+				for( int y = 0; y < drawto->h; y ++ )
 				{
 					int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, y ) );
 					int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, y + 1 ) );
@@ -3237,13 +3403,13 @@ int main( int argc, char **argv )
 					float right_ratio = amplitude_r / amplitude;
 					float separation = fabs( 0.5f - right_ratio ) * 2.f;
 					amplitude /= 4.f * std::max<float>( 7.f, pow(2.f,harmonics) );
-					int w = std::max<int>( 1, std::min<int>( screen->w - 1, screen->w * std::min<float>(0.5f,amplitude) ) );
-					int c = std::max<int>( 0, std::min<int>( screen->w - 1, screen->w * right_ratio ) );
+					int w = std::max<int>( 1, std::min<int>( drawto->w - 1, drawto->w * std::min<float>(0.5f,amplitude) ) );
+					int c = std::max<int>( 0, std::min<int>( drawto->w - 1, drawto->w * right_ratio ) );
 					int x_min = std::max<int>( 0, c - w/2 );
-					int x_max = std::min<int>( screen->w - 1, c + w/2 );
+					int x_max = std::min<int>( drawto->w - 1, c + w/2 );
 					Uint32 color = (separation * separation * amplitude > 0.015625f) ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
 					for( int x = x_min; x <= x_max; x ++ )
-						pixels[ (screen->h - y - 1) * screen->w + x ] = color;
+						pixels[ (drawto->h - y - 1) * drawto->w + x ] = color;
 				}
 				visualizer_fft_height_offset = offset;
 			}
@@ -3279,30 +3445,25 @@ int main( int argc, char **argv )
 			
 			if( time(NULL) <= userdata.MessageUntil )
 			{
-				font2.Draw( 2, screen->h - font2.CharH + 1, userdata.Message, shadow );
-				font2.Draw( 3, screen->h - font2.CharH + 1, userdata.Message, shadow );
-				font2.Draw( 2, screen->h - font2.CharH, userdata.Message );
+				font2.Draw( 2, drawto->h - font2.CharH + 1, userdata.Message, shadow );
+				font2.Draw( 3, drawto->h - font2.CharH + 1, userdata.Message, shadow );
+				font2.Draw( 2, drawto->h - font2.CharH, userdata.Message );
 			}
-			
-			SDL_UnlockSurface( screen );
-			SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
 		}
-		else if( screen && ! visualizer )
+		else if( pixels && ! visualizer )
 		{
 			// No visualizer, so just draw the text black-on-white.
 			
-			SDL_LockSurface( screen );
-			
 			Uint32 bg = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
-			Uint32* pixels = (Uint32*) screen->pixels;
-			for( int x = 0; x < screen->w; x ++ )
+			
+			for( int x = 0; x < drawto->w; x ++ )
 			{
-				for( int y = 0; y < screen->h; y ++ )
-					pixels[ y * screen->w + x ] = bg;
+				for( int y = 0; y < drawto->h; y ++ )
+					pixels[ y * drawto->w + x ] = bg;
 			}
 			
-			font1.SetTarget( (uint32_t*) screen->pixels, screen->w, screen->h );
-			font2.SetTarget( (uint32_t*) screen->pixels, screen->w, screen->h );			
+			font1.SetTarget( pixels, drawto->w, drawto->h );
+			font2.SetTarget( pixels, drawto->w, drawto->h );			
 			font1.Color = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
 			font2.Color = font1.Color;
 			font2.Draw( 2, 2, userdata.Title );
@@ -3316,7 +3477,24 @@ int main( int argc, char **argv )
 			font1.Draw( 2 + x_offset, 2 + font2.CharH, userdata.Album );
 			
 			if( time(NULL) <= userdata.MessageUntil )
-				font2.Draw( 2, screen->h - font2.CharH, userdata.Message );
+				font2.Draw( 2, drawto->h - font2.CharH, userdata.Message );
+		}
+		
+		// Finish drawing.
+		if( pixels )
+		{
+			if( screen != drawto )
+			{
+				int scale = screen->w / drawto->w;
+				SDL_LockSurface( screen );
+				Uint32 *dest = (Uint32*) screen->pixels;
+				
+				for( int x = 0; x < screen->w; x ++ )
+				{
+					for( int y = 0; y < screen->h; y ++ )
+						dest[ y * screen->w + x ] = pixels[ (y/scale) * drawto->w + (x/scale) ];
+				}
+			}
 			
 			SDL_UnlockSurface( screen );
 			SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );

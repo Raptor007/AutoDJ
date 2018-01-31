@@ -16,4 +16,6 @@ public:
 	
 	void FillStream( void *userdata, Uint8 *stream, int len, bool lock = true );
 	void AddToBuffer( void *userdata, int len );
+	
+	int Unfilled( void ) const;
 };

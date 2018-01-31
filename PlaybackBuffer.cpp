@@ -34,6 +34,9 @@ void PlaybackBuffer::SetSize( int size )
 	}
 	
 	BufferSize = Buffer ? size : 0;
+	
+	if( Buffered > BufferSize )
+		Buffered = BufferSize;
 }
 
 
@@ -97,4 +100,10 @@ void PlaybackBuffer::AddToBuffer( void *userdata, int len )
 	}
 	
 	Lock.Unlock();
+}
+
+
+int PlaybackBuffer::Unfilled( void ) const
+{
+	return BufferSize - Buffered;
 }

@@ -38,7 +38,7 @@ class Reverb;
 class UserData;
 
 #define VISUALIZERS            5
-#define VISUALIZER_COLORS     10
+#define VISUALIZER_COLORS     12
 #define VISUALIZER_BACKGROUNDS 4
 
 int SongLoaderThread( void *data_ptr );
@@ -208,18 +208,19 @@ public:
 	float NearestFrame( Uint8 channel ) const
 	{
 		channel %= Audio.Channels;
-		size_t a_index = Audio.Channels * (size_t) CurrentFrame + channel;
+		size_t a_frame = (size_t) CurrentFrame;
+		size_t a_index = Audio.Channels * a_frame + channel;
 		size_t b_index = a_index + Audio.Channels;
 		float a = SampleAtIndex( a_index );
 		float b = SampleAtIndex( b_index );
-		double unused = 0.;
-		return (modf( CurrentFrame, &unused ) >= 0.5) ? b : a;
+		return (CurrentFrame - a_frame >= 0.5) ? b : a;
 	}
 	
 	float CubicFrame( Uint8 channel ) const
 	{
 		channel %= Audio.Channels;
-		size_t a_index = Audio.Channels * (size_t) CurrentFrame + channel;
+		size_t a_frame = (size_t) CurrentFrame;
+		size_t a_index = Audio.Channels * a_frame + channel;
 		size_t b_index = a_index + Audio.Channels;
 		long prev_index = a_index - Audio.Channels;
 		size_t next_index = b_index + Audio.Channels;
@@ -227,8 +228,7 @@ public:
 		float b = SampleAtIndex( b_index );
 		float prev = likely(prev_index >= 0) ? SampleAtIndex( prev_index ) : 0.f;
 		float next = SampleAtIndex( next_index );
-		double unused = 0.;
-		float b_part = modf( CurrentFrame, &unused );
+		float b_part = CurrentFrame - a_frame;
 		/*
 		float along_a_tangent = a + b_part * (b - prev) / 2.;
 		float along_b_tangent = b - (1. - b_part) * (next - a) / 2.;
@@ -1752,6 +1752,10 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		}
 	}
 	
+	// Keep userdata BPM up-to-date with playback BPM.
+	if( ud->SourceBPM )
+		ud->BPM = bpm;
+	
 	// Determine max volume for post effects (EQ/reverb).
 	float max = 0.f;
 	if( ud->VolumeLimit )
@@ -2038,58 +2042,16 @@ int PlaybackThread( void *userdata )
 // --------------------------------------------------------------------------------------
 
 
-Uint32 cycle_color( double cycle, const SDL_PixelFormat *format )
+Uint32 cycle_color( const std::vector<Uint32> *colors, double cycle, const SDL_PixelFormat *format )
 {
-	double unused = 0.;
-	cycle = modf( cycle, &unused );
-	double leg = cycle * 8.;
-	double along = modf( leg, &unused );
-	Uint8 r = 0xFF, g = 0x00, b = 0x00;
-	
-	switch( (int) leg )
-	{
-		case 0: // Red to Yellow
-			r = 255;
-			g = along * 255. + 0.5;
-			b = 0;
-			break;
-		case 1: // Yellow
-			r = 255;
-			g = 255;
-			b = 0;
-			break;
-		case 2: // Yellow to Green
-			r = (1. - along) * 255. + 0.5;
-			g = 255;
-			b = 0;
-			break;
-		case 3: // Green
-			r = 0;
-			g = 255;
-			b = 0;
-			break;
-		case 4: // Green to Cyan
-			r = 0;
-			g = 255;
-			b = along * 255. + 0.5;
-			break;
-		case 5: // Cyan to White
-			r = along * 255. + 0.5;
-			g = 255;
-			b = 255;
-			break;
-		case 6: // White to Magenta
-			r = 255;
-			g = (1. - along) * 255. + 0.5;
-			b = 255;
-			break;
-		case 7: // Magenta to Red
-			r = 255;
-			g = 0;
-			b = (1. - along) * 255. + 0.5;
-			break;
-	}
-	
+	size_t index1 = (size_t) cycle;
+	Uint32 color1 = colors->at( index1 % colors->size() ), color2 = colors->at( (index1 + 1) % colors->size() );
+	double along = cycle - index1;
+	Uint8 r1 = (color1 & 0xFF0000) >> 16, g1 = (color1 & 0x00FF00) >> 8, b1 = color1 & 0x0000FF;
+	Uint8 r2 = (color2 & 0xFF0000) >> 16, g2 = (color2 & 0x00FF00) >> 8, b2 = color2 & 0x0000FF;
+	Uint8 r = r1 * (1. - along) + r2 * along + 0.5;
+	Uint8 g = g1 * (1. - along) + g2 * along + 0.5;
+	Uint8 b = b1 * (1. - along) + b2 * along + 0.5;
 	return SDL_MapRGB( format, r, g, b );
 }
 
@@ -2109,6 +2071,7 @@ int main( int argc, char **argv )
 #endif
 	int zoom = 1;
 	int visualizer = 2;
+	int visualizer_color1 = 8, visualizer_color2 = 9, visualizer_text_color = 0;
 	bool playback = true;
 	bool sdl_audio = true;
 	bool buffer1auto = true, buffer2auto = true;
@@ -2117,7 +2080,6 @@ int main( int argc, char **argv )
 	sdl_audio = false;
 	userdata.HighRes = true;
 #endif
-	int visualizer_color1 = 6, visualizer_color2 = 4, visualizer_text_color = 0;
 	const char *write = NULL;
 	SDL_AudioSpec want;
 	memset( &want, 0, sizeof(want) );
@@ -2146,12 +2108,6 @@ int main( int argc, char **argv )
 				zoom = std::max<int>( 1, atoi( argv[ i ] + strlen("--zoom=") ) );
 			else if( strncasecmp( argv[ i ], "--visualizer=", strlen("--visualizer=") ) == 0 )
 				visualizer = atoi( argv[ i ] + strlen("--visualizer=") );
-			else if( strcasecmp( argv[ i ], "--rainbow" ) == 0 )
-			{
-				visualizer_color1 = 8;
-				visualizer_color2 = 9;
-				visualizer_text_color = 8;
-			}
 			else if( strcasecmp( argv[ i ], "--no-shuffle" ) == 0 )
 				userdata.Shuffle = false;
 			else if( strcasecmp( argv[ i ], "--no-repeat" ) == 0 )
@@ -2469,10 +2425,11 @@ int main( int argc, char **argv )
 	if( zoom > 1 )
 		drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+zoom-1)/zoom, (screen->h+zoom-1)/zoom, screen->format->BitsPerPixel,
 			screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
-	clock_t visualizer_updated_clock = 0, visualizer_prev_clock = 0;
+	clock_t visualizer_updated_clock = 0, prev_clock = 0;
 	size_t visualizer_start_sample = 0;
 	size_t visualizer_loading_frame = 0;
-	int visualizer_color_cycle = 128;
+	double visualizer_hue = 0.;
+	int visualizer_color_cycle = 16;
 	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 2, 3, 3, 1 };
 	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * bytes_per_sample);
 	int visualizer_fft_frames = std::min<int>( visualizer_frames, 1 << (int) log2(userdata.Spec.freq * 0.095 / 4.) );
@@ -2483,6 +2440,48 @@ int main( int argc, char **argv )
 	int visualizer_fft_height_offset = 0;
 	char visualizer_message[ 128 ] = "";
 	int visualizer_scoot = 0;
+	
+	std::vector<Uint32> cycle1;
+	cycle1.push_back(0xFFFFFF); // White
+	cycle1.push_back(0xFF00FF); // Magenta
+	cycle1.push_back(0xFF00FF); // Magenta
+	cycle1.push_back(0xFF0000); // Red
+	cycle1.push_back(0xFFFF00); // Yellow
+	cycle1.push_back(0xFFFF00); // Yellow
+	cycle1.push_back(0x00FF00); // Green
+	cycle1.push_back(0x00FF00); // Green
+	cycle1.push_back(0x00FFFF); // Cyan
+	cycle1.push_back(0x00FFFF); // Cyan
+	cycle1.push_back(0xFFFFFF); // White
+	
+	std::vector<Uint32> cycle2;
+	cycle2.push_back(0xFFFF00); // Yellow
+	cycle2.push_back(0xFFFF00); // Yellow
+	cycle2.push_back(0xFF0000); // Red
+	cycle2.push_back(0xFF8000); // Orange
+	cycle2.push_back(0xFF8000); // Orange
+	cycle2.push_back(0x00FF00); // Green
+	cycle2.push_back(0x00FF00); // Green
+	cycle2.push_back(0x00FFFF); // Cyan
+	cycle2.push_back(0xFF00FF); // Magenta
+	cycle2.push_back(0xFF00FF); // Magenta
+	cycle2.push_back(0xFFFF00); // Yellow
+	
+	std::vector<Uint32> cycle3;
+	cycle3.push_back(0x0000FF); // Blue
+	cycle3.push_back(0xFF00FF); // Magenta
+	cycle3.push_back(0xFF0000); // Red
+	cycle3.push_back(0xFFFF00); // Yellow
+	cycle3.push_back(0x00FF00); // Green
+	cycle3.push_back(0x00FFFF); // Cyan
+	
+	std::vector<Uint32> cycle4;
+	cycle4.push_back(0xFFFFFF); // White
+	cycle4.push_back(0xFFFFFF); // White
+	cycle4.push_back(0xFFFF00); // Yellow
+	cycle4.push_back(0xFFFF00); // Yellow
+	cycle4.push_back(0x00FF00); // Green
+	cycle4.push_back(0x00FF00); // Green
 	
 	// Keep running until playback is complete.
 	userdata.Running = (userdata.Queue.size() || userdata.Songs.size());
@@ -2677,9 +2676,6 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_k )
 					{
-						if( userdata.SourceBPM && userdata.Songs.size() )
-							userdata.BPM = (int)( userdata.Songs.front()->BPM + 0.5 );
-						
 						userdata.BPM -= 1.;
 						userdata.SourceBPM = false;
 						snprintf( visualizer_message, 128, "Playback BPM: %.0f\n", userdata.BPM );
@@ -2689,9 +2685,6 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_l )
 					{
-						if( userdata.SourceBPM && userdata.Songs.size() )
-							userdata.BPM = (int)( userdata.Songs.front()->BPM + 0.5 );
-						
 						userdata.BPM += 1.;
 						userdata.SourceBPM = false;
 						snprintf( visualizer_message, 128, "Playback BPM: %.0f\n", userdata.BPM );
@@ -2840,10 +2833,10 @@ int main( int argc, char **argv )
 							visualizer_color_cycle /= 2;
 						else
 							visualizer_color_cycle *= 2;
-						if( visualizer_color_cycle < 32 )
-							visualizer_color_cycle = 512;
-						else if( visualizer_color_cycle > 512 )
+						if( visualizer_color_cycle < 1 )
 							visualizer_color_cycle = 32;
+						else if( visualizer_color_cycle > 32 )
+							visualizer_color_cycle = 1;
 					}
 					else if( key == SDLK_d )
 					{
@@ -3090,11 +3083,14 @@ int main( int argc, char **argv )
 			pixels = (Uint32*) drawto->pixels;
 		}
 		
+		// This is only used for visualizer, but needs to be here to stay accurate when paused.
+		clock_t now = clock();
+		clock_t elapsed = now - prev_clock;
+		prev_clock = now;
+		
 		// Visualize the waveform in the window.
 		if( pixels && visualizer && (userdata.Playing || userdata.Songs.empty()) )
 		{
-			clock_t now = clock();
-			
 			// Keep the visualizer synchronized with the audio playback.
 			if( userdata.Playing )
 			{
@@ -3102,12 +3098,10 @@ int main( int argc, char **argv )
 				{
 					visualizer_updated_clock = userdata.VisualizerClock;
 					visualizer_start_sample = 0;
-					visualizer_prev_clock = now;
 				}
 				else
 				{
-					size_t frames = userdata.Spec.freq * (now - visualizer_prev_clock) / (double) CLOCKS_PER_SEC;
-					visualizer_prev_clock = now;
+					size_t frames = userdata.Spec.freq * elapsed / (double) CLOCKS_PER_SEC;
 					visualizer_start_sample += userdata.Spec.channels * frames;
 					visualizer_start_sample %= userdata.VisualizerBufferSize / (userdata.Spec.channels * userdata.BytesPerSample());
 				}
@@ -3116,7 +3110,6 @@ int main( int argc, char **argv )
 			{
 				visualizer_loading_frame ++;
 				visualizer_loading_frame %= drawto->h;
-				visualizer_prev_clock = now;
 			}
 			
 			Uint32 colors[ VISUALIZER_COLORS ];
@@ -3128,9 +3121,11 @@ int main( int argc, char **argv )
 			colors[ 5 ] = SDL_MapRGB( screen->format, 0xFF, 0x80, 0x00 ); // Orange to Red
 			colors[ 6 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 ); // Yellow to Red
 			colors[ 7 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 ); // Green
-			double cycle = (now / (double) CLOCKS_PER_SEC) * (userdata.BPM / 60.) / (double) visualizer_color_cycle;
-			colors[ 8 ] = cycle_color( cycle, screen->format );
-			colors[ 9 ] = cycle_color( cycle - 0.03125, screen->format );
+			visualizer_hue += (elapsed / (double) CLOCKS_PER_SEC) * (userdata.BPM / 60.) / (double) visualizer_color_cycle;
+			colors[  8 ] = cycle_color( &cycle1, visualizer_hue, screen->format );
+			colors[  9 ] = cycle_color( &cycle2, visualizer_hue, screen->format );
+			colors[ 10 ] = cycle_color( &cycle3, visualizer_hue, screen->format );
+			colors[ 11 ] = cycle_color( &cycle4, visualizer_hue, screen->format );
 			
 			font1.SetTarget( pixels, drawto->w, drawto->h );
 			font2.SetTarget( pixels, drawto->w, drawto->h );
@@ -3416,7 +3411,7 @@ int main( int argc, char **argv )
 			
 			font1.Color = colors[ visualizer_text_color ];
 			font2.Color = font1.Color;
-			uint32_t shadow = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
+			Uint32 shadow = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
 			
 			if( userdata.Crossfading )
 				visualizer_scoot ++;

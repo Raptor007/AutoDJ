@@ -207,13 +207,7 @@ public:
 	
 	float NearestFrame( Uint8 channel ) const
 	{
-		channel %= Audio.Channels;
-		size_t a_frame = (size_t) CurrentFrame;
-		size_t a_index = Audio.Channels * a_frame + channel;
-		size_t b_index = a_index + Audio.Channels;
-		float a = SampleAtIndex( a_index );
-		float b = SampleAtIndex( b_index );
-		return (CurrentFrame - a_frame >= 0.5) ? b : a;
+		return SampleAtIndex( Audio.Channels * (size_t)(CurrentFrame + 0.5) + channel % Audio.Channels );
 	}
 	
 	float CubicFrame( Uint8 channel ) const
@@ -1668,7 +1662,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		{
 			// Not crossfading yet.
 			
-			if( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.01) )
+			if( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.001) )
 			{
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 					streamF[ i + channel ] = current_song->NearestFrame( channel ) * volume;
@@ -1688,8 +1682,8 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			if( ud->SourceBPM )
 				bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
 			
-			bool a_nearest = ( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.01) );
-			bool b_nearest = ( ((size_t) ud->Spec.freq == next_song->Audio.SampleRate   ) && (fabs(next_song->BPM    - bpm) < 0.01) );
+			bool a_nearest = ( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.001) );
+			bool b_nearest = ( ((size_t) ud->Spec.freq == next_song->Audio.SampleRate   ) && (fabs(next_song->BPM    - bpm) < 0.001) );
 			
 			for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 			{
@@ -2119,8 +2113,17 @@ int main( int argc, char **argv )
 				const char *pitch = argv[ i ] + strlen("--pitch=");
 				if( pitch[ 0 ] == '+' )
 					pitch ++;
-				userdata.SourcePitchScale = pow( 2., atof(pitch) / 12. );
+				userdata.SourcePitchScale *= pow( 2., atof(pitch) / 12. );
 				userdata.SourceBPM = true;
+			}
+			else if( strncasecmp( argv[ i ], "--a=", strlen("--a=") ) == 0 )
+			{
+				double a_hz = atof( argv[ i ] + strlen("--a=") );
+				if( a_hz )
+				{
+					userdata.SourcePitchScale *= a_hz / 440.;
+					userdata.SourceBPM = true;
+				}
 			}
 			else if( strncasecmp( argv[ i ], "--bpm=", strlen("--bpm=") ) == 0 )
 			{
@@ -2697,7 +2700,13 @@ int main( int argc, char **argv )
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale /= pow( 2., 1./12. );
 						double st = log2(userdata.SourcePitchScale) / log2(pow( 2., 1./12. ));
-						snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
+						if( userdata.Songs.size() )
+						{
+							userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
+						}
+						else
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );
@@ -2707,7 +2716,13 @@ int main( int argc, char **argv )
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale *= pow( 2., 1./12. );
 						double st = log2(userdata.SourcePitchScale) / log2(pow( 2., 1./12. ));
-						snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
+						if( userdata.Songs.size() )
+						{
+							userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
+						}
+						else
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 					}
@@ -2772,14 +2787,14 @@ int main( int argc, char **argv )
 					else if( key == SDLK_SLASH )
 					{
 						userdata.SourceBPM = true;
-						userdata.SourcePitchScale = 1.;
+						userdata.SourcePitchScale = shift ? (432./440.) : 1.;
 						if( userdata.Songs.size() )
 						{
-							userdata.BPM = userdata.Songs.front()->BPM;
-							snprintf( visualizer_message, 128, "Pitch/BPM: Match Source (%.1f BPM)\n", userdata.BPM );
+							userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
+							snprintf( visualizer_message, 128, "Pitch/BPM: %s (%.1f BPM)\n", shift ? "A440 to A432" : "Match Source", userdata.BPM );
 						}
 						else
-							snprintf( visualizer_message, 128, "Pitch/BPM: Match Source\n" );
+							snprintf( visualizer_message, 128, "Pitch/BPM: %s\n", shift ? "A440 to A432" : "Match Source" );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );
@@ -3271,6 +3286,7 @@ int main( int argc, char **argv )
 			else if( visualizer == 2 )
 			{
 				// Show spectrum of frequencies.
+				int bar_width = drawto->w / (visualizer_fft_frames/2) + 1;
 				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
 				float base = pow( 2., log2( visualizer_fft_frames/2 ) / (drawto->w + visualizer_fft_width_offset) );
 				for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
@@ -3281,16 +3297,23 @@ int main( int argc, char **argv )
 						visualizer_fft_complex[ i ].re = userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
-					int offset = 0;
+					int offset = 0, pixels_wide = 0;
 					for( int x = 0; x < drawto->w; x ++ )
 					{
 						int band_min = std::min<int>( visualizer_fft_frames - 1, offset + pow( base, x ) );
 						int band_max = std::min<int>( visualizer_fft_frames, offset + pow( base, x + 1 ) );
 						if( band_min == band_max )
 						{
-							offset ++;
+							pixels_wide ++;
+							if(likely( pixels_wide >= bar_width ))
+							{
+								offset ++;
+								pixels_wide = 0;
+							}
 							band_max ++;
 						}
+						else
+							pixels_wide = 0;
 						float harmonics = 1.f + log2( (visualizer_fft_frames/2) / band_max );
 						float amplitude = 0.f;
 						for( int band = band_min; band < band_max; band ++ )

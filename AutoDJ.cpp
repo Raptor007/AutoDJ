@@ -37,7 +37,7 @@ class ReverbParam;
 class Reverb;
 class UserData;
 
-#define VISUALIZERS            5
+#define VISUALIZERS            6
 #define VISUALIZER_COLORS     12
 #define VISUALIZER_BACKGROUNDS 4
 
@@ -76,6 +76,10 @@ std::deque<std::string> DirSongs( std::string path );
 const char *PATH_SEPARATOR = "\\";
 #else
 const char *PATH_SEPARATOR = "/";
+#endif
+
+#ifdef __APPLE__
+void FileDropEnable( void );
 #endif
 
 
@@ -1324,10 +1328,6 @@ public:
 					
 					bool first_song = Songs.empty();
 					
-					// Only the first song should play pre-beat lead-in.
-					if( ! first_song )
-						song->CurrentFrame = song->FirstBeatFrame;
-					
 					// Done loading and analyzing, so put it in the playback queue.
 					Songs.push_back( song );
 					
@@ -1635,11 +1635,20 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		crossfade_now = false;
 		crossfade = 0.;
 		
-		if( next_song )
+		if(likely( next_song ))
 		{
-			// Calculate when to do the crossfade and for how long.
-			if( ! calculated_crossfade )
+			if(unlikely( ! ud->CrossfadeOut ))
+			{
+				// Crossfade disabled, so start at the end of the song with 0 duration.
+				crossfade_for_beats = 0;
+				crossfade_at_beat = current_song->TotalBeats();
+				calculated_crossfade = true;
+			}
+			else if(unlikely( ! calculated_crossfade ))
+			{
+				// Calculate when to do the crossfade and for how long.
 				calculated_crossfade = CalculateCrossfade( current_song, next_song, &crossfade_for_beats, &crossfade_at_beat );
+			}
 			
 			// Now that we've determined how crossfade should be done, see if we should do it now.
 			if( calculated_crossfade && (current_song->Beat() >= crossfade_at_beat) )
@@ -1651,6 +1660,10 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 					crossfade = (current_song->Beat() - crossfade_at_beat) / crossfade_for_beats;
 					if( crossfade > 1. )
 						crossfade = 1.;
+					
+					// If we're just starting a crossfade, make sure the next song is on its first beat.
+					if( (! next_song->CurrentFrame) && ! current_song->Finished() )
+						next_song->CurrentFrame = next_song->FirstBeatFrame;
 				}
 				else
 					crossfade = 1.;
@@ -1658,7 +1671,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		}
 		
 		
-		if( ! crossfade_now )
+		if(likely( ! crossfade_now ))
 		{
 			// Not crossfading yet.
 			
@@ -1720,7 +1733,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 		
 		// Add metronome if enabled.
 		
-		if( ud->Metronome )
+		if(unlikely( ud->Metronome ))
 		{
 			double beat_ipart = 0.;
 			double beat_fpart = modf( current_song->Beat(), &beat_ipart );
@@ -1793,14 +1806,6 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	{
 		fwrite( stream, 1, len, ud->WriteTo );
 		ud->WroteBytes += len;
-	}
-	
-	// Remove tracks that have finished playing.
-	while( ud->Songs.size() && (ud->Songs.front()->Finished()) )
-	{
-		Song *front = ud->Songs.front();
-		ud->Songs.pop_front();
-		delete front;
 	}
 }
 
@@ -2059,6 +2064,7 @@ int main( int argc, char **argv )
 	UserData userdata;
 	bool window = true;
 	bool fullscreen = false;
+	size_t fullscreen_w = 0, fullscreen_h = 0;
 	bool resize = false;
 #ifdef WIN32
 	resize = true;
@@ -2283,7 +2289,7 @@ int main( int argc, char **argv )
 	if( window )
 	{
 		SDL_WM_SetCaption( "Raptor007's AutoDJ", "AutoDJ" );
-		screen = fullscreen ? SDL_SetVideoMode( 0, 0, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256*zoom, 64*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+		screen = fullscreen ? SDL_SetVideoMode( fullscreen_w, fullscreen_h, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256*zoom, 64*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 	}
 	
 	// Prepare audio file input.
@@ -2433,7 +2439,7 @@ int main( int argc, char **argv )
 	size_t visualizer_loading_frame = 0;
 	double visualizer_hue = 0.;
 	int visualizer_color_cycle = 16;
-	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 2, 3, 3, 1 };
+	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 2, 3, 2, 3, 1 };
 	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * bytes_per_sample);
 	int visualizer_fft_frames = std::min<int>( visualizer_frames, 1 << (int) log2(userdata.Spec.freq * 0.095 / 4.) );
 	FFTContext *visualizer_fft_context = av_fft_init( log2(visualizer_fft_frames), false );
@@ -2486,6 +2492,10 @@ int main( int argc, char **argv )
 	cycle4.push_back(0x00FF00); // Green
 	cycle4.push_back(0x00FF00); // Green
 	
+#ifdef __APPLE__
+	FileDropEnable();
+#endif
+	
 	// Keep running until playback is complete.
 	userdata.Running = (userdata.Queue.size() || userdata.Songs.size());
 	SDL_Thread *playback_thread = SDL_CreateThread( &PlaybackThread, &userdata );
@@ -2525,6 +2535,25 @@ int main( int argc, char **argv )
 								screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
 						}
 					}
+				}
+				else if( event.type == SDL_USEREVENT )
+				{
+					std::string *filename = (std::string*) event.user.data1;
+					
+					std::deque<std::string> songs = DirSongs( *filename );
+					
+					if( userdata.Shuffle && (songs.size() > 1) )
+					{
+						// When adding multiple, shuffle the new entries and schedule a queue reshuffle soon.
+						std::random_shuffle( songs.begin(), songs.end() );
+						userdata.ShuffleDelay = 1;
+					}
+					
+					// Bump new songs to the front of the line.
+					for( std::deque<std::string>::const_reverse_iterator song_iter = songs.rbegin(); song_iter != songs.rend(); song_iter ++ )
+						userdata.Queue.push_front( *song_iter );
+					
+					delete filename;
 				}
 				else if( event.type == SDL_KEYDOWN )
 				{
@@ -2583,6 +2612,52 @@ int main( int argc, char **argv )
 								drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+scale-1)/scale, (screen->h+scale-1)/scale, screen->format->BitsPerPixel,
 									screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
 							}
+						}
+					}
+					else if( key == SDLK_w )
+					{
+						if( fullscreen )
+						{
+							if( drawto != screen )
+								SDL_FreeSurface( drawto );
+							fullscreen_w = screen->w;
+							fullscreen_h = screen->h;
+							SDL_FreeSurface( screen );
+							screen = SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+							drawto = screen;
+							fullscreen = false;
+						}
+						else if( resize && ! shift )
+						{
+							if( drawto != screen )
+								SDL_FreeSurface( drawto );
+							SDL_FreeSurface( screen );
+							screen = NULL;
+							if( fullscreen_w && fullscreen_h )
+								screen = SDL_SetVideoMode( fullscreen_w, fullscreen_h, 0, SDL_SWSURFACE | SDL_FULLSCREEN );
+							if( ! screen )
+								screen = SDL_SetVideoMode( 1920, 1080, 0, SDL_SWSURFACE | SDL_FULLSCREEN );
+							if( ! screen )
+								screen = SDL_SetVideoMode( 640, 480, 0, SDL_SWSURFACE | SDL_FULLSCREEN );
+							if( screen )
+							{
+								fullscreen_w = screen->w;
+								fullscreen_h = screen->h;
+							}
+							else
+								screen = SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+							drawto = screen;
+							fullscreen = true;
+						}
+						else
+						{
+							resize = ! resize;
+							size_t w = screen->w, h = screen->h;
+							bool same_drawto = (drawto == screen);
+							SDL_FreeSurface( screen );
+							screen = SDL_SetVideoMode( w, h, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+							if( same_drawto )
+								drawto = screen;
 						}
 					}
 					else if( key == SDLK_MINUS )
@@ -2649,7 +2724,9 @@ int main( int argc, char **argv )
 						{
 							Song *current_song = userdata.Songs.front();
 							int beat = current_song->Beat();
-							if( userdata.Crossfading )
+							if( ! userdata.CrossfadeOut )
+								userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
+							else if( userdata.Crossfading )
 							{
 								current_song->FirstOutroFrame = 1.;
 								current_song->OutroBeats = 1;
@@ -2672,7 +2749,7 @@ int main( int argc, char **argv )
 					{
 						if( userdata.Songs.size() )
 						{
-							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames - 2;
+							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
 							if( userdata.Songs.size() < 2 )
 								userdata.SetMessage( "Loading...", 4 );
 						}
@@ -2737,22 +2814,17 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_x )
 					{
-						if( userdata.CrossfadeIn < 96 )
+						if( userdata.CrossfadeOut )
 						{
-							userdata.CrossfadeIn = 96;
-							userdata.CrossfadeOut = 128;
+							userdata.CrossfadeOut = 0;
+							snprintf( visualizer_message, 128, "Crossfade Disabled\n" );
 						}
 						else
 						{
-							userdata.CrossfadeIn = 1;
-							userdata.CrossfadeOut = 1;
+							userdata.CrossfadeOut = 128;
+							int beats = std::min<int>( userdata.CrossfadeIn, userdata.CrossfadeOut );
+							snprintf( visualizer_message, 128, "Crossfade: %i Beat%s\n", beats, (beats == 1) ? "" : "s" );
 						}
-						
-						for( std::deque<Song*>::iterator song_iter = userdata.Songs.begin(); song_iter != userdata.Songs.end(); song_iter ++ )
-							(*song_iter)->SetIntroOutroBeats( userdata.CrossfadeIn, userdata.CrossfadeOut );
-						
-						int beats = std::min<int>( userdata.CrossfadeIn, userdata.CrossfadeOut );
-						snprintf( visualizer_message, 128, "Crossfade: %i Beat%s\n", beats, (beats == 1) ? "" : "s" );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );
@@ -2871,6 +2943,13 @@ int main( int argc, char **argv )
 								visualizer_backgrounds[ visualizer ] += VISUALIZER_BACKGROUNDS - 1;
 							visualizer_backgrounds[ visualizer ] %= VISUALIZER_BACKGROUNDS;
 						}
+					}
+					else if( key == SDLK_s )
+					{
+						visualizer_color1 = 8;
+						visualizer_color2 = 9;
+						visualizer_text_color = 0;
+						visualizer_color_cycle = 16;
 					}
 					else if( key == SDLK_e )
 					{
@@ -3329,6 +3408,55 @@ int main( int argc, char **argv )
 			
 			else if( visualizer == 3 )
 			{
+				// Show left/right stereo panning.
+#ifdef ALLOW_VLA
+				float buckets[ drawto->w ];
+				bool main_bucket[ drawto->w ];
+				memset( buckets, 0, drawto->w * sizeof(float) );
+				memset( main_bucket, 0, drawto->w * sizeof(bool) );
+#else
+				float buckets[ 8192 ] = {0};
+				bool main_bucket[ 8192 ] = {0};
+#endif
+				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
+				for( int ch = (userdata.Spec.channels > 1) ? 1 : 0; ch >= 0; ch -- )
+				{
+					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
+					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
+					for( int i = 0; i < frames; i ++ )
+						for( int in_ch = ch; in_ch < userdata.Spec.channels; in_ch += 2 )
+							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + in_ch );
+					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
+					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
+				}
+				const FFTComplex *spectrum_l = visualizer_fft_complex_l;
+				const FFTComplex *spectrum_r = (userdata.Spec.channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
+				for( int i = 1; i < frames - 1; i ++ )
+				{
+					float amplitude_l = sqrt( spectrum_l[ i ].re * spectrum_l[ i ].re + spectrum_l[ i ].im * spectrum_l[ i ].im );
+					float amplitude_r = sqrt( spectrum_r[ i ].re * spectrum_r[ i ].re + spectrum_r[ i ].im * spectrum_r[ i ].im );
+					float amplitude = amplitude_l + amplitude_r;
+					if(likely( amplitude ))
+					{
+						size_t bucket = std::min<size_t>( drawto->w - 1, (amplitude_r / amplitude) * drawto->w );
+						float freq = ((float) i) * userdata.Spec.freq / frames;
+						float freq_scale = std::max<float>( 0.f, sin(log(freq) - 1.3f) );
+						float addition = amplitude * freq_scale * freq_scale / 24.f;
+						if( addition > buckets[ bucket ] )
+							main_bucket[ bucket ] |= (freq > 200.) && (freq < 4000.);
+						buckets[ bucket ] += addition;
+					}
+				}
+				for( int x = 0; x < drawto->w; x ++ )
+				{
+					int h = std::max<int>( 0, std::min<int>( drawto->h - 1, drawto->h * buckets[ x ] ) );
+					for( int y = drawto->h - 1 - h; y < drawto->h; y ++ )
+						pixels[ y * drawto->w + x ] = main_bucket[ x ] ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
+				}
+			}
+			
+			else if( visualizer == 4 )
+			{
 				// Show left/right spectrum of frequencies.
 				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
 				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (drawto->h + visualizer_fft_height_offset) );
@@ -3381,7 +3509,7 @@ int main( int argc, char **argv )
 				visualizer_fft_height_offset = offset;
 			}
 			
-			else if( visualizer == 4 )
+			else if( visualizer == 5 )
 			{
 				// Show left/right separation of frequencies.
 				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );

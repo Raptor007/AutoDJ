@@ -20,6 +20,7 @@ PREFIX = /opt/local
 LIBDIR = $(PREFIX)/lib
 LIB = libSDLmain.a libSDL.a libavdevice.a libavformat.a libavfilter.a libavcodec.a libavresample.a libswscale.a libavutil.a libswresample.a libbluray.a libfreetype.a libpng.a libxml2.a libiconv.a libfaac.a libfdk-aac.a libmp3lame.a libopus.a libschroedinger-1.0.a libtheoradec.a libtheora.a libvorbisenc.a libvorbis.a libvpx.a libx264.a libx265.a libxvidcore.a libgmp.a libspeex.a libmodplug.dylib libflac.a libvorbisfile.a libvorbis.a libogg.a libXrandr.a libXrender.a libXext.a libX11.a libxcb.a libXdmcp.a libXau.a libbz2.a liblzma.a libz.a libopenjp2.dylib libsoxr.dylib liborc-0.4.0.dylib libgnutls.dylib
 FW = Cocoa VideoDecodeAcceleration OpenGL CoreVideo CoreFoundation AudioUnit AudioToolbox IOKit Carbon
+MISC_OBJ += FileDrop.om
 ARCH = i386
 CFLAGS += $(foreach arch,$(ARCH),-arch $(arch)) -mmacosx-version-min=10.4 -dead_strip
 TARGET = AutoDJ.app
@@ -91,9 +92,11 @@ autodj AutoDJ AutoDJ.exe: $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(MISC_OBJ)
 
 %.o: %.cpp $(wildcard *.h)
 	$(CC) $(CFLAGS) -g -c $< $(foreach inc,$(INC),-I$(inc)) -o $@
+%.om: %.mm $(wildcard *.h)
+	$(CC) $(CFLAGS) -Wno-unused-parameter -g -c $< $(foreach inc,$(INC),-I$(inc)) -o $@
 
 clean:
-	rm -rf *.o autodj AutoDJ AutoDJ.app
+	rm -rf *.o *.om autodj AutoDJ AutoDJ.app
 
 install:
 	rsync -ax $(TARGET) $(INSTALL_DIR)/

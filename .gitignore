@@ -9,6 +9,7 @@
 *.pbxuser
 *.xcuserstate
 *.o
+*.om
 *.res
 *.app
 *.dSYM

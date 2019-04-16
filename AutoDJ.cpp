@@ -914,22 +914,13 @@ public:
 		av_free( Complex );
 	}
 	
-	void Process( float *buffer, EqualizerParam *param, float max = 0.f )
+	void Process( float *buffer, EqualizerParam *param )
 	{
-		// If clipping prevention is enabled, scale down if needed.
-		float pre_eq = 1.f;
-		if( max )
-		{
-			float highest = param->MaxScale();
-			if( highest > max )
-				pre_eq = max / highest;
-		}
-		
 		for( size_t ch = 0; ch < Channels; ch ++ )
 		{
 			memset( Complex, 0, Frames * sizeof(FFTComplex) );
 			for( size_t i = 0; i < Frames; i ++ )
-				Complex[ i ].re = buffer[ (i * Channels) + ch ] * pre_eq;
+				Complex[ i ].re = buffer[ (i * Channels) + ch ];
 			av_fft_permute( Context1, Complex );
 			av_fft_calc( Context1, Complex );
 			
@@ -955,7 +946,6 @@ public:
 			
 			#define EQ_ANTIPOP (Rate / 500)  // 2ms each end = 88 samples each end at 44.1KHz
 			float new_scale = 1.f / Frames;
-			float old_scale = pre_eq * scale0;
 			
 			for( size_t i = EQ_ANTIPOP; i < Frames - EQ_ANTIPOP; i ++ )
 				buffer[ (i * Channels) + ch ] = Complex[ i ].re * new_scale;
@@ -964,9 +954,9 @@ public:
 			for( size_t i = 0; i < end_antipop; i ++ )
 			{
 				float new_part = i / (float) EQ_ANTIPOP;
-				buffer[ (i * Channels) + ch ] = new_part * Complex[ i ].re * new_scale + (1.f - new_part) * old_scale * buffer[ (i * Channels) + ch ];
+				buffer[ (i * Channels) + ch ] = new_part * Complex[ i ].re * new_scale + (1.f - new_part) * scale0 * buffer[ (i * Channels) + ch ];
 				size_t j = Frames - 1 - i;
-				buffer[ (j * Channels) + ch ] = new_part * Complex[ j ].re * new_scale + (1.f - new_part) * old_scale * buffer[ (j * Channels) + ch ];
+				buffer[ (j * Channels) + ch ] = new_part * Complex[ j ].re * new_scale + (1.f - new_part) * scale0 * buffer[ (j * Channels) + ch ];
 			}
 		}
 	}
@@ -982,13 +972,13 @@ public:
 	Equalizer( void ){}
 	~Equalizer(){}
 	
-	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param, float max = 0. )
+	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param )
 	{
 		#ifdef EQ_FRAMES
 		if( frames > EQ_FRAMES )
 		{
 			for( size_t chunk = 0; (chunk + 1) * EQ_FRAMES <= frames; chunk ++ )
-				Process( (float*) (((char*) buffer) + sizeof(*buffer) * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param, max );
+				Process( (float*) (((char*) buffer) + sizeof(*buffer) * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param );
 			return;
 		}
 		#endif
@@ -999,7 +989,7 @@ public:
 			if( EqualizerFFTs.find(frames) == EqualizerFFTs.end() )
 				EqualizerFFTs[ frames ] = new EqualizerFFT( channels, rate, frames );
 			
-			EqualizerFFTs[ frames ]->Process( buffer, param, max );
+			EqualizerFFTs[ frames ]->Process( buffer, param );
 		}
 	}
 };
@@ -1134,7 +1124,7 @@ public:
 	
 	#define REVERB_HISTORY_FRAMES 262144
 	
-	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, ReverbParam *param, float max = 0.f )
+	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, ReverbParam *param )
 	{
 		bool changed_rate = (Rate != rate);
 		Rate = rate;
@@ -1160,11 +1150,6 @@ public:
 		if( changed_rate || (param->SameSide.size() + param->OppoSide.size() == 0) )
 			param->Setup( rate );
 		
-		// If clipping prevention is enabled, scale down if needed.
-		float scale = 1.f;
-		if( max && (param->TotalScale > max) )
-			scale = max / param->TotalScale;
-		
 		size_t bounces_same = param->SameSide.size();
 		size_t bounces_oppo = param->OppoSide.size();
 		
@@ -1187,7 +1172,7 @@ public:
 					if( from_frame >= 0 )
 						val += History[ channels * from_frame + (ch+1)%channels ] * param->OppoSide[ i ].AmpScale;
 				}
-				buffer[ index ] = val * scale;
+				buffer[ index ] = val;
 			}
 		}
 	}
@@ -1215,7 +1200,6 @@ public:
 	int CrossfadeOut;
 	float Volume;
 	bool VolumeMatching;
-	float VolumeLimit;
 	bool Repeat;
 	bool Shuffle;
 	size_t ShuffleDelay;
@@ -1252,7 +1236,6 @@ public:
 		CrossfadeOut = 128;
 		Volume = 1.;
 		VolumeMatching = true;
-		VolumeLimit = 0.;
 		Repeat = true;
 		Shuffle = true;
 		ShuffleDelay = 0;
@@ -1367,6 +1350,10 @@ public:
 					
 					Loader.StartLoading( song_name.c_str() );
 				}
+				
+				// Stop saying "Loading" when it's done.
+				if( strcmp( Message, "Loading..." ) == 0 )
+					memset( Message, 0, sizeof(Message) );
 			}
 			
 			// Update visualizer text.
@@ -1396,7 +1383,7 @@ public:
 	
 	float VisualizerAmpScale( void ) const
 	{
-		// Make the visualizer look good regardless of volume/EQ/reverb/clipping settings.
+		// Make the visualizer look good regardless of volume/EQ/reverb settings.
 		
 		float volume = Volume;
 		float excess = 1.f;
@@ -1422,9 +1409,6 @@ public:
 				excess /= reverb_avg;
 			}
 		}
-		
-		if( VolumeLimit && (volume * excess > VolumeLimit) )
-			volume = VolumeLimit / excess;
 		
 		if( (volume <= 0.f) || (volume > 1.f) )
 			return 1.f;
@@ -1621,12 +1605,6 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	
 	volume = ud->VolumeMatching ? ud->Volume * current_song->VolumeAdjustment() : ud->Volume;
 	volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
-	if( ud->VolumeLimit )
-	{
-		volume = std::min<float>( current_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume );
-		if( next_song )
-			volume_next = std::min<float>( next_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume_next );
-	}
 	
 	for( size_t i = 0; i < samples; i += ud->Spec.channels )
 	{
@@ -1719,8 +1697,6 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				
 				volume = volume_next;
 				volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
-				if( ud->VolumeLimit && next_song )
-					volume_next = std::min<float>( next_song->VolumeAdjustmentToMax() * ud->VolumeLimit, volume_next );
 				
 				calculated_crossfade = false;
 				crossfade_now = false;
@@ -1762,31 +1738,13 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	// Keep userdata BPM up-to-date with playback BPM.
 	if( ud->SourceBPM )
 		ud->BPM = bpm;
-	
-	// Determine max volume for post effects (EQ/reverb).
-	float max = 0.f;
-	if( ud->VolumeLimit )
-	{
-		float vol = volume * (1.f - crossfade) + volume_next * crossfade;
-		max = vol ? (ud->VolumeLimit / vol) : 0.f;
-	}
 		
 	// Apply equalizer if enabled.
 	if( ud->EQ )
-	{
-		GlobalEQ.Process( streamF, ud->Spec.channels, ud->Spec.freq, samples / ud->Spec.channels, ud->EQ, max );
-		if( max )
-		{
-			float highest = ud->EQ->MaxScale();
-			if( highest > max )
-				max = 1.f;  // The EQ already hit our volume cap, so don't let reverb go louder.
-			else
-				max /= highest;
-		}
-	}
-		
+		GlobalEQ.Process( streamF, ud->Spec.channels, ud->Spec.freq, samples / ud->Spec.channels, ud->EQ );
+	
 	// Apply reverb if enabled, or just remember old audio buffer.
-	GlobalReverb.Process( streamF, ud->Spec.channels, ud->Spec.freq, samples / ud->Spec.channels, ud->Reverb, max );
+	GlobalReverb.Process( streamF, ud->Spec.channels, ud->Spec.freq, samples / ud->Spec.channels, ud->Reverb );
 	
 	// If not outputting float, convert to 16-bit output format.
 	if( (void*) streamF != stream )
@@ -2083,7 +2041,7 @@ int main( int argc, char **argv )
 	const char *write = NULL;
 	SDL_AudioSpec want;
 	memset( &want, 0, sizeof(want) );
-	want.freq = 44100;
+	want.freq = userdata.HighRes ? 192000 : 44100;
 	want.format = AUDIO_S16;
 	want.channels = 2;
 	want.samples = 4096;
@@ -2162,8 +2120,6 @@ int main( int argc, char **argv )
 			}
 			else if( strcasecmp( argv[ i ], "--no-volume-matching" ) == 0 )
 				userdata.VolumeMatching = false;
-			else if( strcasecmp( argv[ i ], "--prevent-clipping" ) == 0 )
-				userdata.VolumeLimit = 1.;
 			else if( strncasecmp( argv[ i ], "--eq=", strlen("--eq=") ) == 0 )
 			{
 				userdata.EQ = new EqualizerParam();
@@ -2541,17 +2497,25 @@ int main( int argc, char **argv )
 					std::string *filename = (std::string*) event.user.data1;
 					
 					std::deque<std::string> songs = DirSongs( *filename );
-					
-					if( userdata.Shuffle && (songs.size() > 1) )
+					size_t num_songs = songs.size();
+					if( num_songs )
 					{
-						// When adding multiple, shuffle the new entries and schedule a queue reshuffle soon.
-						std::random_shuffle( songs.begin(), songs.end() );
-						userdata.ShuffleDelay = 1;
+						if( userdata.Shuffle && num_songs )
+						{
+							// When adding multiple, shuffle the new entries and schedule a queue reshuffle soon.
+							std::random_shuffle( songs.begin(), songs.end() );
+							userdata.ShuffleDelay = 1;
+						}
+						
+						// Bump new songs to the front of the line.
+						for( std::deque<std::string>::const_reverse_iterator song_iter = songs.rbegin(); song_iter != songs.rend(); song_iter ++ )
+							userdata.Queue.push_front( *song_iter );
+						
+						snprintf( visualizer_message, 128, "Added %i songs.", (int) num_songs );
+						userdata.SetMessage( visualizer_message, 4 );
+						printf( "%s", visualizer_message );
+						fflush( stdout );
 					}
-					
-					// Bump new songs to the front of the line.
-					for( std::deque<std::string>::const_reverse_iterator song_iter = songs.rbegin(); song_iter != songs.rend(); song_iter ++ )
-						userdata.Queue.push_front( *song_iter );
 					
 					delete filename;
 				}
@@ -2686,36 +2650,18 @@ int main( int argc, char **argv )
 						printf( "%s", visualizer_message );
 						fflush( stdout );
 					}
-					else if( key == SDLK_p )
-					{
-						if( ! userdata.VolumeLimit )
-							userdata.VolumeLimit = shift ? 8. : 1.;
-						else if( userdata.VolumeLimit < 1.1 )
-							userdata.VolumeLimit = shift ? 0. : sqrt(2.);
-						else if( userdata.VolumeLimit > 7.9 )
-							userdata.VolumeLimit *= shift ? sqrt(0.5) : 0.;
-						else
-							userdata.VolumeLimit *= shift ? sqrt(0.5) : sqrt(2.);
-						
-						if( userdata.VolumeLimit )
-						{
-							float db = 6. * log2(userdata.VolumeLimit);
-							snprintf( visualizer_message, 128, "Clipping Limit: +%.0fdB\n", db );
-						}
-						else
-							snprintf( visualizer_message, 128, "Clipping Limit: Off\n" );
-						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
-					}
 					else if( key == SDLK_LEFTBRACKET || key == SDLK_LEFT )
 					{
-						if( userdata.Songs.size() )
+						size_t songs_size = userdata.Songs.size();
+						if( songs_size )
 						{
 							Song *current_song = userdata.Songs.front();
 							current_song->CurrentFrame = 0.;
 							current_song->FirstOutroFrame = 0.;
 							current_song->SetIntroOutroBeats( userdata.CrossfadeIn, userdata.CrossfadeOut );
+							
+							if( songs_size >= 2 )
+								userdata.Songs.at( 1 )->CurrentFrame = 0;
 						}
 					}
 					else if( key == SDLK_RIGHTBRACKET || key == SDLK_RIGHT )
@@ -3398,7 +3344,8 @@ int main( int argc, char **argv )
 						for( int band = band_min; band < band_max; band ++ )
 							amplitude += sqrt( visualizer_fft_complex[ band ].re * visualizer_fft_complex[ band ].re + visualizer_fft_complex[ band ].im * visualizer_fft_complex[ band ].im );
 						amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
-						int h = std::max<int>( 0, std::min<int>( drawto->h - 1, drawto->h * amplitude ) );
+						float height = std::min<float>( drawto->h, drawto->w / 3.f );
+						int h = std::max<int>( 0, std::min<int>( drawto->h - 1, height * amplitude ) );
 						for( int y = drawto->h - 1 - h; y < drawto->h; y ++ )
 							pixels[ y * drawto->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 					}
@@ -3449,7 +3396,8 @@ int main( int argc, char **argv )
 				}
 				for( int x = 0; x < drawto->w; x ++ )
 				{
-					int h = std::max<int>( 0, std::min<int>( drawto->h - 1, drawto->h * buckets[ x ] ) );
+					float height = std::min<float>( drawto->h, drawto->w / 3.f );
+					int h = std::max<int>( 0, std::min<int>( drawto->h - 1, height * buckets[ x ] ) );
 					for( int y = drawto->h - 1 - h; y < drawto->h; y ++ )
 						pixels[ y * drawto->w + x ] = main_bucket[ x ] ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
 				}

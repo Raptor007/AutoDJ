@@ -2458,6 +2458,7 @@ int main( int argc, char **argv )
 	while( userdata.Running )
 	{
 		size_t prev_song_count = userdata.Songs.size();
+		size_t adding_songs = 0;
 		
 		userdata.CheckSongLoading();
 		
@@ -2511,7 +2512,10 @@ int main( int argc, char **argv )
 						for( std::deque<std::string>::const_reverse_iterator song_iter = songs.rbegin(); song_iter != songs.rend(); song_iter ++ )
 							userdata.Queue.push_front( *song_iter );
 						
-						snprintf( visualizer_message, 128, "Added %i songs.", (int) num_songs );
+						// Total count of songs added this frame.
+						adding_songs += num_songs;
+						
+						snprintf( visualizer_message, 128, "Added %i songs.", (int) adding_songs );
 						userdata.SetMessage( visualizer_message, 4 );
 						printf( "%s", visualizer_message );
 						fflush( stdout );
@@ -2911,10 +2915,10 @@ int main( int argc, char **argv )
 								userdata.EQ->FreqScale.clear();
 								userdata.EQ->FreqScale[    32. ] = 1.;
 								userdata.EQ->FreqScale[    64. ] = was_flat ? pow( 2.,  1./6. ) : 1.;
-								userdata.EQ->FreqScale[   125. ] = 1.;
+								userdata.EQ->FreqScale[   125. ] = was_flat ? pow( 2.,  1./6. ) : 1.;
 								userdata.EQ->FreqScale[   250. ] = 1.;
 								userdata.EQ->FreqScale[   500. ] = 1.;
-								userdata.EQ->FreqScale[  1000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  1000. ] = 1.;
 								userdata.EQ->FreqScale[  2000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
 								userdata.EQ->FreqScale[  4000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
 								userdata.EQ->FreqScale[  8000. ] = was_flat ? pow( 2., -2./6. ) : 1.;

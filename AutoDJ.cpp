@@ -1999,7 +1999,7 @@ int PlaybackThread( void *userdata )
 // --------------------------------------------------------------------------------------
 
 
-Uint32 cycle_color( const std::vector<Uint32> *colors, double cycle, const SDL_PixelFormat *format )
+Uint32 CycleColor( const std::vector<Uint32> *colors, double cycle, const SDL_PixelFormat *format )
 {
 	size_t index1 = (size_t) cycle;
 	Uint32 color1 = colors->at( index1 % colors->size() ), color2 = colors->at( (index1 + 1) % colors->size() );
@@ -2010,6 +2010,30 @@ Uint32 cycle_color( const std::vector<Uint32> *colors, double cycle, const SDL_P
 	Uint8 g = g1 * (1. - along) + g2 * along + 0.5;
 	Uint8 b = b1 * (1. - along) + b2 * along + 0.5;
 	return SDL_MapRGB( format, r, g, b );
+}
+
+
+SDL_Surface *NewDrawTo( SDL_Surface *screen, int zoom )
+{
+	int w = screen->w/zoom, h = screen->h/zoom;
+	SDL_Surface *drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, w, h, screen->format->BitsPerPixel,
+		screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+	
+	if( (screen->w % zoom) || (screen->h % zoom) )
+	{
+		// If it won't fit exactly, blank out the screen.
+		Uint32 bg = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
+		SDL_LockSurface( screen );
+		Uint32* pixels = (Uint32*) screen->pixels;
+		for( int x = 0; x < screen->w; x ++ )
+		{
+			for( int y = 0; y < screen->h; y ++ )
+				pixels[ y * screen->w + x ] = bg;
+		}
+		SDL_UnlockSurface( screen );
+	}
+	
+	return drawto;
 }
 
 
@@ -2030,6 +2054,7 @@ int main( int argc, char **argv )
 	int zoom = 1;
 	int visualizer = 2;
 	int visualizer_color1 = 8, visualizer_color2 = 9, visualizer_text_color = 0;
+	bool visualizer_text = true;
 	bool playback = true;
 	bool sdl_audio = true;
 	bool buffer1auto = true, buffer2auto = true;
@@ -2388,8 +2413,7 @@ int main( int argc, char **argv )
 	// Visualizer variables.
 	SDL_Surface *drawto = screen;
 	if( zoom > 1 )
-		drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+zoom-1)/zoom, (screen->h+zoom-1)/zoom, screen->format->BitsPerPixel,
-			screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+		drawto = NewDrawTo( screen, zoom );
 	clock_t visualizer_updated_clock = 0, prev_clock = 0;
 	size_t visualizer_start_sample = 0;
 	size_t visualizer_loading_frame = 0;
@@ -2480,16 +2504,15 @@ int main( int argc, char **argv )
 				{
 					if( (event.resize.w != screen->w) || (event.resize.h != screen->h) )
 					{
-						int scale = std::max<int>( 1, screen->w / drawto->w );
+						int zoom = std::max<int>( 1, screen->w / drawto->w );
 						SDL_FreeSurface( screen );
-						screen = SDL_SetVideoMode( (event.resize.w/scale)*scale, (event.resize.h/scale)*scale, 0, SDL_SWSURFACE | SDL_RESIZABLE );
-						if( scale <= 1 )
+						screen = SDL_SetVideoMode( (event.resize.w/zoom)*zoom, (event.resize.h/zoom)*zoom, 0, SDL_SWSURFACE | SDL_RESIZABLE );
+						if( zoom <= 1 )
 							drawto = screen;
 						else
 						{
 							SDL_FreeSurface( drawto );
-							drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, screen->w/scale, screen->h/scale, screen->format->BitsPerPixel,
-								screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+							drawto = NewDrawTo( screen, zoom );
 						}
 					}
 				}
@@ -2541,35 +2564,33 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_PAGEUP )
 					{
-						int scale = (screen->w / drawto->w) + 1;
+						int zoom = (screen->w / drawto->w) + 1;
 						if( ! fullscreen )
 						{
 							if( screen == drawto )
 							{
-								drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, screen->w, screen->h, screen->format->BitsPerPixel,
-									screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+								drawto = NewDrawTo( screen, zoom );
 							}
 							SDL_FreeSurface( screen );
-							screen = SDL_SetVideoMode( drawto->w*scale, drawto->h*scale, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+							screen = SDL_SetVideoMode( drawto->w*zoom, drawto->h*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 						}
 						else
 						{
 							SDL_FreeSurface( drawto );
-							drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+scale-1)/scale, (screen->h+scale-1)/scale, screen->format->BitsPerPixel,
-								screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+							drawto = NewDrawTo( screen, zoom );
 						}
 					}
 					else if( key == SDLK_PAGEDOWN )
 					{
-						int scale = (screen->w / drawto->w) - 1;
-						if( scale >= 1 )
+						int zoom = (screen->w / drawto->w) - 1;
+						if( zoom >= 1 )
 						{
 							if( ! fullscreen )
 							{
 								SDL_FreeSurface( screen );
-								screen = SDL_SetVideoMode( drawto->w*scale, drawto->h*scale, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+								screen = SDL_SetVideoMode( drawto->w*zoom, drawto->h*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 							}
-							if( scale == 1 )
+							if( zoom == 1 )
 							{
 								SDL_FreeSurface( drawto );
 								drawto = screen;
@@ -2577,8 +2598,7 @@ int main( int argc, char **argv )
 							else if( fullscreen )
 							{
 								SDL_FreeSurface( drawto );
-								drawto = SDL_CreateRGBSurface( SDL_SWSURFACE, (screen->w+scale-1)/scale, (screen->h+scale-1)/scale, screen->format->BitsPerPixel,
-									screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask );
+								drawto = NewDrawTo( screen, zoom );
 							}
 						}
 					}
@@ -2894,12 +2914,17 @@ int main( int argc, char **argv )
 							visualizer_backgrounds[ visualizer ] %= VISUALIZER_BACKGROUNDS;
 						}
 					}
+					else if( key == SDLK_t )
+					{
+						visualizer_text = ! visualizer_text;
+					}
 					else if( key == SDLK_s )
 					{
 						visualizer_color1 = 8;
 						visualizer_color2 = 9;
 						visualizer_text_color = 0;
 						visualizer_color_cycle = 16;
+						visualizer_text = true;
 					}
 					else if( key == SDLK_e )
 					{
@@ -3166,10 +3191,10 @@ int main( int argc, char **argv )
 			colors[ 6 ] = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0x00 ); // Yellow to Red
 			colors[ 7 ] = SDL_MapRGB( screen->format, 0x00, 0xFF, 0x00 ); // Green
 			visualizer_hue += (elapsed / (double) CLOCKS_PER_SEC) * (userdata.BPM / 60.) / (double) visualizer_color_cycle;
-			colors[  8 ] = cycle_color( &cycle1, visualizer_hue, screen->format );
-			colors[  9 ] = cycle_color( &cycle2, visualizer_hue, screen->format );
-			colors[ 10 ] = cycle_color( &cycle3, visualizer_hue, screen->format );
-			colors[ 11 ] = cycle_color( &cycle4, visualizer_hue, screen->format );
+			colors[  8 ] = CycleColor( &cycle1, visualizer_hue, screen->format );
+			colors[  9 ] = CycleColor( &cycle2, visualizer_hue, screen->format );
+			colors[ 10 ] = CycleColor( &cycle3, visualizer_hue, screen->format );
+			colors[ 11 ] = CycleColor( &cycle4, visualizer_hue, screen->format );
 			
 			font1.SetTarget( pixels, drawto->w, drawto->h );
 			font2.SetTarget( pixels, drawto->w, drawto->h );
@@ -3523,29 +3548,32 @@ int main( int argc, char **argv )
 			int title_scoot = std::max<int>( 0, (visualizer_scoot - 50) / 2 );
 			int artist_scoot = visualizer_scoot / 3;
 			
-			font2.Draw( 2 - title_scoot, 3, userdata.Title, shadow );
-			font2.Draw( 3 - title_scoot, 3, userdata.Title, shadow );
-			font2.Draw( 2 - title_scoot, 2, userdata.Title );
-			font1.Draw( 2 - artist_scoot, 3 + font2.CharH, userdata.Artist, shadow );
-			font1.Draw( 3 - artist_scoot, 3 + font2.CharH, userdata.Artist, shadow );
-			font1.Draw( 2 - artist_scoot, 2 + font2.CharH, userdata.Artist );
-			int x_offset = font1.CharW * strlen(userdata.Artist);
-			if( x_offset && userdata.Album[ 0 ] )
+			if( visualizer_text )
 			{
-				font1.Draw( 2 - artist_scoot + x_offset, 3 + font2.CharH, " - ", shadow );
-				font1.Draw( 3 - artist_scoot + x_offset, 3 + font2.CharH, " - ", shadow );
-				font1.Draw( 2 - artist_scoot + x_offset, 2 + font2.CharH, " - " );
-				x_offset += 3 * font1.CharW;
-			}
-			font1.Draw( 2 - artist_scoot + x_offset, 3 + font2.CharH, userdata.Album, shadow );
-			font1.Draw( 3 - artist_scoot + x_offset, 3 + font2.CharH, userdata.Album, shadow );
-			font1.Draw( 2 - artist_scoot + x_offset, 2 + font2.CharH, userdata.Album );
-			
-			if( time(NULL) <= userdata.MessageUntil )
-			{
-				font2.Draw( 2, drawto->h - font2.CharH + 1, userdata.Message, shadow );
-				font2.Draw( 3, drawto->h - font2.CharH + 1, userdata.Message, shadow );
-				font2.Draw( 2, drawto->h - font2.CharH, userdata.Message );
+				font2.Draw( 2 - title_scoot, 3, userdata.Title, shadow );
+				font2.Draw( 3 - title_scoot, 3, userdata.Title, shadow );
+				font2.Draw( 2 - title_scoot, 2, userdata.Title );
+				font1.Draw( 2 - artist_scoot, 3 + font2.CharH, userdata.Artist, shadow );
+				font1.Draw( 3 - artist_scoot, 3 + font2.CharH, userdata.Artist, shadow );
+				font1.Draw( 2 - artist_scoot, 2 + font2.CharH, userdata.Artist );
+				int x_offset = font1.CharW * strlen(userdata.Artist);
+				if( x_offset && userdata.Album[ 0 ] )
+				{
+					font1.Draw( 2 - artist_scoot + x_offset, 3 + font2.CharH, " - ", shadow );
+					font1.Draw( 3 - artist_scoot + x_offset, 3 + font2.CharH, " - ", shadow );
+					font1.Draw( 2 - artist_scoot + x_offset, 2 + font2.CharH, " - " );
+					x_offset += 3 * font1.CharW;
+				}
+				font1.Draw( 2 - artist_scoot + x_offset, 3 + font2.CharH, userdata.Album, shadow );
+				font1.Draw( 3 - artist_scoot + x_offset, 3 + font2.CharH, userdata.Album, shadow );
+				font1.Draw( 2 - artist_scoot + x_offset, 2 + font2.CharH, userdata.Album );
+				
+				if( time(NULL) <= userdata.MessageUntil )
+				{
+					font2.Draw( 2, drawto->h - font2.CharH + 1, userdata.Message, shadow );
+					font2.Draw( 3, drawto->h - font2.CharH + 1, userdata.Message, shadow );
+					font2.Draw( 2, drawto->h - font2.CharH, userdata.Message );
+				}
 			}
 		}
 		else if( pixels && ! visualizer )
@@ -3583,14 +3611,18 @@ int main( int argc, char **argv )
 		{
 			if( screen != drawto )
 			{
-				int scale = screen->w / drawto->w;
+				int zoom = screen->w / drawto->w;
 				SDL_LockSurface( screen );
 				Uint32 *dest = (Uint32*) screen->pixels;
+				int x_end = std::min<int>( screen->w, drawto->w * zoom );
+				int y_end = std::min<int>( screen->h, drawto->h * zoom );
 				
-				for( int x = 0; x < screen->w; x ++ )
+				for( int y = 0; y < y_end; y ++ )
 				{
-					for( int y = 0; y < screen->h; y ++ )
-						dest[ y * screen->w + x ] = pixels[ (y/scale) * drawto->w + (x/scale) ];
+					int from = (y/zoom) * drawto->w;
+					int into = y * screen->w;
+					for( int x = 0; x < x_end; x ++ )
+						dest[ into + x ] = pixels[ from + (x/zoom) ];
 				}
 			}
 			

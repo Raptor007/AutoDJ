@@ -2568,9 +2568,7 @@ int main( int argc, char **argv )
 						if( ! fullscreen )
 						{
 							if( screen == drawto )
-							{
-								drawto = NewDrawTo( screen, zoom );
-							}
+								drawto = NewDrawTo( screen, 1 );
 							SDL_FreeSurface( screen );
 							screen = SDL_SetVideoMode( drawto->w*zoom, drawto->h*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 						}
@@ -2856,7 +2854,8 @@ int main( int argc, char **argv )
 						
 						if( screen && ! visualizer )
 						{
-							Uint32 bg = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+							Uint8 rbg = fullscreen ? 0x00 : 0xFF;
+							Uint32 bg = SDL_MapRGB( screen->format, rbg, rbg, rbg );
 							SDL_LockSurface( screen );
 							Uint32* pixels = (Uint32*) screen->pixels;
 							for( int x = 0; x < screen->w; x ++ )
@@ -3580,7 +3579,14 @@ int main( int argc, char **argv )
 		{
 			// No visualizer, so just draw the text black-on-white.
 			
-			Uint32 bg = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+			Uint32 black = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
+			Uint32 white = SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+			Uint32 bg = white, fg = black;
+			if( fullscreen )
+			{
+				bg = black;
+				fg = white;
+			}
 			
 			for( int x = 0; x < drawto->w; x ++ )
 			{
@@ -3590,8 +3596,8 @@ int main( int argc, char **argv )
 			
 			font1.SetTarget( pixels, drawto->w, drawto->h );
 			font2.SetTarget( pixels, drawto->w, drawto->h );			
-			font1.Color = SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 );
-			font2.Color = font1.Color;
+			font1.Color = fg;
+			font2.Color = fg;
 			font2.Draw( 2, 2, userdata.Title );
 			font1.Draw( 2, 2 + font2.CharH, userdata.Artist );
 			int x_offset = font1.CharW * strlen(userdata.Artist);

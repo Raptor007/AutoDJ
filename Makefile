@@ -14,6 +14,7 @@ MISC_OBJ = FontBin.o
 TARGET = autodj
 INSTALL_DIR = /usr/local/bin
 UNAME = $(shell uname)
+MAC_CODESIGN = $(shell whoami)
 
 ifeq ($(UNAME), Darwin)
 PREFIX = /opt/local
@@ -63,7 +64,8 @@ AutoDJ.app: AutoDJ Info.plist
 	$(foreach lib,$(DYLIB),cp -p "$(PREFIX)/lib/$(lib)" "$@/Contents/MacOS/"; chmod 644 "$@/Contents/MacOS/$(notdir $(lib))";)
 	$(foreach lib,$(DYLIB),$(PREFIX)/bin/install_name_tool -change "$(PREFIX)/lib/$(lib)" "@loader_path/$(notdir $(lib))" "$@/Contents/MacOS/AutoDJ";)
 	$(foreach lib1,$(DYLIB),$(foreach lib2,$(DYLIB),$(PREFIX)/bin/install_name_tool -change "$(PREFIX)/lib/$(lib1)" "@loader_path/$(notdir $(lib1))" "$@/Contents/MacOS/$(notdir $(lib2))";))
-	-codesign -s $(shell whoami) $@
+	-codesign -s "$(MAC_CODESIGN)" $@
+	-if [ -L "$@/Contents/CodeResources" ]; then rm "$@/Contents/CodeResources"; rsync -ax "$@/Contents/_CodeSignature/CodeResources" "$@/Contents/"; fi
 
 AutoDJ.res: AutoDJ.rc
 	windres $< -O coff -o $@

@@ -39,7 +39,7 @@ class UserData;
 
 #define VISUALIZERS            6
 #define VISUALIZER_COLORS     12
-#define VISUALIZER_BACKGROUNDS 4
+#define VISUALIZER_BACKGROUNDS 5
 
 int SongLoaderThread( void *data_ptr );
 float LinearCrossfade( float a, float b, float b_percent );
@@ -3306,6 +3306,48 @@ int main( int argc, char **argv )
 						g = std::max<Uint8>( std::max<Uint8>( g1, g2 ), g3 );
 						b = std::max<Uint8>( std::max<Uint8>( b1, b2 ), b3 );
 						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+					}
+				}
+			}
+			else if( visualizer_backgrounds[ visualizer ] == 4 )
+			{
+				// Prismatic fade.
+				Uint8 r = 0x00, g = 0x00, b = 0x00;
+				Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00, r3 = 0x00, g3 = 0x00, b3 = 0x00;
+				for( int y = 0; y < drawto->h; y ++ )
+				{
+					r2 = 0x00; g2 = 0x00; b2 = 0x00;
+					SDL_GetRGB( pixels[ y * drawto->w ], screen->format, &r3, &g3, &b3 );
+					for( int x = 0; x < drawto->w; x ++ )
+					{
+						r1 = r2; g1 = g2; b1 = b2;
+						r2 = r3; g2 = g3; b2 = b3;
+						if( x + 1 < drawto->w )
+							SDL_GetRGB( pixels[ y * drawto->w + (x+1) ], screen->format, &r3, &g3, &b3 );
+						else
+							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
+						r = std::max<Uint8>( std::max<Uint8>( r1*0.22f, r2       ), r3*0.22f );
+						g = std::max<Uint8>( std::max<Uint8>( g1*0.55f, g2*0.92f ), g3*0.55f );
+						b = std::max<Uint8>( std::max<Uint8>( b1*0.33f, b2       ), b3*0.33f );
+						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, r, g, b );
+					}
+				}
+				for( int x = 0; x < drawto->w; x ++ )
+				{
+					r2 = 0x00; g2 = 0x00; b2 = 0x00;
+					SDL_GetRGB( pixels[ x ], screen->format, &r3, &g3, &b3 );
+					for( int y = 0; y < drawto->h; y ++ )
+					{
+						r1 = r2; g1 = g2; b1 = b2;
+						r2 = r3; g2 = g3; b2 = b3;
+						if( y + 1 < drawto->h )
+							SDL_GetRGB( pixels[ (y+1) * drawto->w + x ], screen->format, &r3, &g3, &b3 );
+						else
+							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
+						r = std::max<Uint8>( r3*0.97f, r2*0.22f );
+						g = g2;
+						b = std::max<Uint8>( b1*0.98f, b2*0.33f );
+						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, r, g, b );
 					}
 				}
 			}

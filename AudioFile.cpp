@@ -50,8 +50,6 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 	// Technically adding 0 bytes isn't an error, but reading from NULL is.
 	if( ! add_size )
 		return true;
-	if( ! add_data )
-		return false;
 	
 	// Make sure we have enough room for the new data.
 	if( Allocated < Size + add_size )
@@ -71,6 +69,7 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 				Data = new_data;
 			else
 			{
+				fprintf( stderr, "Couldn't realloc to %iMB buffer!\n", (int)(Allocated/(1024*1024)) );
 				free( Data );
 				Data = NULL;
 				Allocated = 0;
@@ -78,10 +77,18 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 			}
 		}
 		else
+		{
 			Data = (uint8_t*) malloc( Allocated );
+			if( ! Data )
+			{
+				fprintf( stderr, "Couldn't alloc %iMB buffer!\n", (int)(Allocated/(1024*1024)) );
+				Allocated = 0;
+				Size = 0;
+			}
+		}
 	}
 	
-	if( Data )
+	if( Data && add_data )
 	{
 		// Add data to the buffer.
 		memcpy( Data + Size, add_data, add_size );
@@ -208,6 +215,17 @@ end:
 	{
 		avresample_close( avr );
 		avresample_free( &avr );
+	}
+	
+	// Attempt to shrink the buffer to the used size, but don't throw it away if realloc fails.
+	if( Allocated > Size )
+	{
+		uint8_t *new_data = (uint8_t*) realloc( Data, Size );
+		if( new_data )
+		{
+			Data = new_data;
+			Allocated = Size;
+		}
 	}
 	
 	return audio_stream;

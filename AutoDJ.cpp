@@ -87,6 +87,7 @@ void FileDropEnable( void );
 
 
 bool AlwaysLoadFloat = false;
+size_t LoadAlloc = 800*1024*1024;
 
 
 class Song
@@ -116,6 +117,9 @@ public:
 		
 		if( AlwaysLoadFloat )
 			Audio.SampleFormat = AV_SAMPLE_FMT_FLT;
+		
+		if( LoadAlloc )
+			Audio.AddData( NULL, LoadAlloc );
 		
 		if( Audio.Load( filename, RunningPtr ) )
 		{
@@ -2198,6 +2202,8 @@ int main( int argc, char **argv )
 				userdata.Buffer.SetSize( atoi( argv[ i ] + strlen("--buffer2=") ) * 2 * want.channels );
 				buffer2auto = false;
 			}
+			else if( strncasecmp( argv[ i ], "--load-alloc=", strlen("--load-alloc=") ) == 0 )
+				LoadAlloc = atoi( argv[ i ] + strlen("--load-alloc=") ) * 1024*1024;
 			else if( strcasecmp( argv[ i ], "--no-playback" ) == 0 )
 				playback = false;
 			else if( strcasecmp( argv[ i ], "--compile" ) == 0 )
@@ -2419,7 +2425,7 @@ int main( int argc, char **argv )
 	size_t visualizer_loading_frame = 0;
 	double visualizer_hue = 0.;
 	int visualizer_color_cycle = 16;
-	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 2, 3, 2, 3, 1 };
+	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 3, 3, 2, 3, 1 };
 	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * bytes_per_sample);
 	int visualizer_fft_frames = std::min<int>( visualizer_frames, 1 << (int) log2(userdata.Spec.freq * 0.095 / 4.) );
 	FFTContext *visualizer_fft_context = av_fft_init( log2(visualizer_fft_frames), false );
@@ -2457,20 +2463,20 @@ int main( int argc, char **argv )
 	cycle2.push_back(0xFFFF00); // Yellow
 	
 	std::vector<Uint32> cycle3;
-	cycle3.push_back(0x0000FF); // Blue
-	cycle3.push_back(0xFF00FF); // Magenta
-	cycle3.push_back(0xFF0000); // Red
+	cycle3.push_back(0xFFFFFF); // White
+	cycle3.push_back(0xFFFFFF); // White
+	cycle3.push_back(0xFFFF00); // Yellow
 	cycle3.push_back(0xFFFF00); // Yellow
 	cycle3.push_back(0x00FF00); // Green
-	cycle3.push_back(0x00FFFF); // Cyan
+	cycle3.push_back(0x00FF00); // Green
 	
 	std::vector<Uint32> cycle4;
-	cycle4.push_back(0xFFFFFF); // White
-	cycle4.push_back(0xFFFFFF); // White
-	cycle4.push_back(0xFFFF00); // Yellow
+	cycle4.push_back(0x0000FF); // Blue
+	cycle4.push_back(0xFF00FF); // Magenta
+	cycle4.push_back(0xFF0000); // Red
 	cycle4.push_back(0xFFFF00); // Yellow
 	cycle4.push_back(0x00FF00); // Green
-	cycle4.push_back(0x00FF00); // Green
+	cycle4.push_back(0x00FFFF); // Cyan
 	
 #ifdef __APPLE__
 	FileDropEnable();
@@ -2919,10 +2925,10 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_s )
 					{
-						visualizer_color1 = 8;
-						visualizer_color2 = 9;
+						visualizer_color1 = shift ? 10 : 8;
+						visualizer_color2 = shift ? 11 : 9;
 						visualizer_text_color = 0;
-						visualizer_color_cycle = 16;
+						visualizer_color_cycle = shift ? 8 : 16;
 						visualizer_text = true;
 					}
 					else if( key == SDLK_e )

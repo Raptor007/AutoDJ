@@ -87,7 +87,6 @@ void FileDropEnable( void );
 
 
 bool AlwaysLoadFloat = false;
-size_t LoadAlloc = 800*1024*1024;
 
 
 class Song
@@ -117,9 +116,6 @@ public:
 		
 		if( AlwaysLoadFloat )
 			Audio.SampleFormat = AV_SAMPLE_FMT_FLT;
-		
-		if( LoadAlloc )
-			Audio.AddData( NULL, LoadAlloc );
 		
 		if( Audio.Load( filename, RunningPtr ) )
 		{
@@ -2202,8 +2198,6 @@ int main( int argc, char **argv )
 				userdata.Buffer.SetSize( atoi( argv[ i ] + strlen("--buffer2=") ) * 2 * want.channels );
 				buffer2auto = false;
 			}
-			else if( strncasecmp( argv[ i ], "--load-alloc=", strlen("--load-alloc=") ) == 0 )
-				LoadAlloc = atoi( argv[ i ] + strlen("--load-alloc=") ) * 1024*1024;
 			else if( strcasecmp( argv[ i ], "--no-playback" ) == 0 )
 				playback = false;
 			else if( strcasecmp( argv[ i ], "--compile" ) == 0 )

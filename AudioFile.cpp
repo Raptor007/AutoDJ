@@ -56,9 +56,15 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 	{
 		size_t need_size = add_size + Size - Allocated;
 		
-		// Allocate in 16MB chunks to reduce the number of times we have to do it.
-		#define CHUNK_SIZE (16*1024*1024)
-		if( need_size % CHUNK_SIZE )
+		// Always start with 808MB (about 80 minutes 44.1KHz 16-bit stereo) to better handle compilations.
+		#define MINIMUM_SIZE (808*1024*1024)
+		
+		// Additional allocations are in 32MB chunks to reduce the number of times we have to do it.
+		#define CHUNK_SIZE (32*1024*1024)
+		
+		if( (! Allocated) && (need_size < MINIMUM_SIZE) )
+			need_size = MINIMUM_SIZE;
+		else if( need_size % CHUNK_SIZE )
 			need_size += CHUNK_SIZE - (need_size % CHUNK_SIZE);
 		
 		Allocated += need_size;
@@ -70,6 +76,7 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 			else
 			{
 				fprintf( stderr, "Couldn't realloc to %iMB buffer!\n", (int)(Allocated/(1024*1024)) );
+				// FIXME: Should this retain the old buffer and wait for more memory to free up?
 				free( Data );
 				Data = NULL;
 				Allocated = 0;
@@ -226,6 +233,8 @@ end:
 			Data = new_data;
 			Allocated = Size;
 		}
+		else
+			fprintf( stderr, "Couldn't shrink to %iMB buffer!\n", (int)(Size/(1024*1024)) );
 	}
 	
 	return audio_stream;

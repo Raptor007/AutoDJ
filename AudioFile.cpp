@@ -45,53 +45,81 @@ void AudioFile::Clear( void )
 }
 
 
+bool AudioFile::SetAllocation( size_t new_alloc )
+{
+	if( Allocated == new_alloc )
+		return true;
+	
+	if( ! new_alloc )
+	{
+		free( Data );
+		Data = NULL;
+		Allocated = 0;
+		return true;
+	}
+	
+	if( Data )
+	{
+		uint8_t *new_data = (uint8_t*) realloc( Data, new_alloc );
+		if( new_data )
+		{
+			Data = new_data;
+			Allocated = new_alloc;
+			return true;
+		}
+	}
+	else
+	{
+		Data = (uint8_t*) malloc( new_alloc );
+		if( Data )
+		{
+			Allocated = new_alloc;
+			return true;
+		}
+	}
+	
+	return false;
+}
+
+
 bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 {
-	// Technically adding 0 bytes isn't an error, but reading from NULL is.
 	if( ! add_size )
 		return true;
+	
+#ifdef WIN32
+	// First attempt 808MB to better handle compilations; it's okay if this fails.
+	#define FIRST_ALLOC (808*1024*1024)
+	if( (! Allocated) && (add_size <= FIRST_ALLOC) )
+		SetAllocation( FIRST_ALLOC );
+#endif
 	
 	// Make sure we have enough room for the new data.
 	if( Allocated < Size + add_size )
 	{
-		size_t need_size = add_size + Size - Allocated;
-		
-		// Always start with 808MB (about 80 minutes 44.1KHz 16-bit stereo) to better handle compilations.
-		#define MINIMUM_SIZE (808*1024*1024)
+		size_t new_alloc = add_size + Size;
 		
 		// Additional allocations are in 32MB chunks to reduce the number of times we have to do it.
 		#define CHUNK_SIZE (32*1024*1024)
+		if( new_alloc % CHUNK_SIZE )
+			new_alloc += CHUNK_SIZE - (new_alloc % CHUNK_SIZE);
 		
-		if( (! Allocated) && (need_size < MINIMUM_SIZE) )
-			need_size = MINIMUM_SIZE;
-		else if( need_size % CHUNK_SIZE )
-			need_size += CHUNK_SIZE - (need_size % CHUNK_SIZE);
-		
-		Allocated += need_size;
-		if( Data )
+		// Try to reallocate, and handle failure.
+		if( ! SetAllocation( new_alloc ) )
 		{
-			uint8_t *new_data = (uint8_t*) realloc( Data, Allocated );
-			if( new_data )
-				Data = new_data;
-			else
+			if( Data )
 			{
-				fprintf( stderr, "Couldn't realloc to %iMB buffer!\n", (int)(Allocated/(1024*1024)) );
+				fprintf( stderr, "Couldn't realloc %iMB buffer!\n", (int)(new_alloc/(1024*1024)) );
 				// FIXME: Should this retain the old buffer and wait for more memory to free up?
 				free( Data );
 				Data = NULL;
 				Allocated = 0;
 				Size = 0;
 			}
-		}
-		else
-		{
-			Data = (uint8_t*) malloc( Allocated );
-			if( ! Data )
-			{
-				fprintf( stderr, "Couldn't alloc %iMB buffer!\n", (int)(Allocated/(1024*1024)) );
-				Allocated = 0;
-				Size = 0;
-			}
+			else
+				fprintf( stderr, "Couldn't malloc %iMB buffer!\n", (int)(new_alloc/(1024*1024)) );
+			
+			return false;
 		}
 	}
 	
@@ -225,17 +253,8 @@ end:
 	}
 	
 	// Attempt to shrink the buffer to the used size, but don't throw it away if realloc fails.
-	if( Allocated > Size )
-	{
-		uint8_t *new_data = (uint8_t*) realloc( Data, Size );
-		if( new_data )
-		{
-			Data = new_data;
-			Allocated = Size;
-		}
-		else
-			fprintf( stderr, "Couldn't shrink to %iMB buffer!\n", (int)(Size/(1024*1024)) );
-	}
+	if( Size && ! SetAllocation( Size ) )
+		fprintf( stderr, "Couldn't shrink to %iMB buffer!\n", (int)(Size/(1024*1024)) );
 	
 	return audio_stream;
 }

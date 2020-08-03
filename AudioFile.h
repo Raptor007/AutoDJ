@@ -24,6 +24,7 @@ public:
 	~AudioFile();
 	
 	void Clear( void );
+	bool SetAllocation( size_t new_alloc );
 	bool AddData( uint8_t *add_data, size_t add_size );
 	bool Load( const char *filename, volatile bool *running_ptr );
 

@@ -88,8 +88,10 @@ bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
 		return true;
 	
 #ifdef WIN32
-	// First attempt 808MB to better handle compilations; it's okay if this fails.
+	// First attempt 80 minutes to better handle compilations; it's okay if this fails.
 	#define FIRST_ALLOC (808*1024*1024)
+	if( (! Allocated) && (add_size <= FIRST_ALLOC) && (SampleFormat == AV_SAMPLE_FMT_FLT) )
+		SetAllocation( FIRST_ALLOC * 2 );
 	if( (! Allocated) && (add_size <= FIRST_ALLOC) )
 		SetAllocation( FIRST_ALLOC );
 #endif

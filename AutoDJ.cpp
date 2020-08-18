@@ -2128,6 +2128,8 @@ int main( int argc, char **argv )
 				userdata.CrossfadeIn = atoi( argv[ i ] + strlen("--crossfade=") );
 				userdata.CrossfadeOut = userdata.CrossfadeIn;
 			}
+			else if( strcasecmp( argv[ i ], "--no-crossfade" ) == 0 )
+				userdata.CrossfadeOut = 0;
 			else if( strncasecmp( argv[ i ], "--volume=", strlen("--volume=") ) == 0 )
 			{
 				const char *volume = argv[ i ] + strlen("--volume=");
@@ -2790,6 +2792,8 @@ int main( int argc, char **argv )
 						else
 						{
 							userdata.CrossfadeOut = 128;
+							if( ! userdata.CrossfadeIn )
+								userdata.CrossfadeIn = 96;
 							int beats = std::min<int>( userdata.CrossfadeIn, userdata.CrossfadeOut );
 							snprintf( visualizer_message, 128, "Crossfade: %i Beat%s\n", beats, (beats == 1) ? "" : "s" );
 						}
@@ -2811,7 +2815,7 @@ int main( int argc, char **argv )
 						if( userdata.Songs.size() )
 						{
 							Song *current_song = userdata.Songs.front();
-							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() - 32. );
+							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() - (shift ? 128. : 32.) );
 							if( current_song->CurrentFrame < 0. )
 								current_song->CurrentFrame = 0.;
 						}
@@ -2821,7 +2825,7 @@ int main( int argc, char **argv )
 						if( userdata.Songs.size() )
 						{
 							Song *current_song = userdata.Songs.front();
-							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() + 32. );
+							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() + (shift ? 128. : 32.) );
 						}
 					}
 					else if( key == SDLK_SLASH )

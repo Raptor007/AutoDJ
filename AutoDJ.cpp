@@ -7,6 +7,7 @@
 #include <climits>
 #include <cfloat>
 #include <ctime>
+#include <cstring>
 #include <deque>
 #include <vector>
 #include <map>
@@ -74,6 +75,8 @@ std::deque<std::string> DirSongs( std::string path );
 
 #ifdef WIN32
 const char *PATH_SEPARATOR = "\\";
+#include <shlwapi.h>
+#define strcasestr StrStrIA
 #else
 const char *PATH_SEPARATOR = "/";
 #endif
@@ -93,6 +96,7 @@ class Song
 {
 public:
 	AudioFile Audio;
+	std::string Filename;
 	size_t TotalFrames;
 	double BPM;
 	double CurrentFrame, FirstBeatFrame, FirstOutroFrame;
@@ -103,6 +107,9 @@ public:
 	
 	Song( const char *filename, volatile bool *running_ptr )
 	{
+		if( filename )
+			Filename = filename;
+		
 		TotalFrames = 0;
 		BPM = 138.;
 		CurrentFrame = 0.;
@@ -157,6 +164,11 @@ public:
 	
 	~Song()
 	{
+	}
+	
+	double CurrentSeconds( void ) const
+	{
+		return CurrentFrame / (double) Audio.SampleRate;
 	}
 	
 	double TotalSeconds( void ) const
@@ -751,6 +763,7 @@ class SongLoader
 {
 public:
 	volatile bool Finished;
+	volatile bool KeepThis;
 	volatile bool Running;
 	std::string Filename;
 	Song *LoadingSong;
@@ -759,6 +772,7 @@ public:
 	SongLoader( void )
 	{
 		Finished = true;
+		KeepThis = true;
 		Running = true;
 		LoadingSong = NULL;
 		Thread = SDL_CreateThread( &SongLoaderThread, this );
@@ -774,11 +788,13 @@ public:
 		Filename.clear();
 		Filename.append( filename );
 		Finished = false;
+		KeepThis = true;
 	}
 	
 	void Quit( void )
 	{
 		Running = false;
+		KeepThis = false;
 		if( Thread )
 		{
 			int unused = 0;
@@ -974,14 +990,14 @@ public:
 	
 	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param )
 	{
-		#ifdef EQ_FRAMES
+#ifdef EQ_FRAMES
 		if( frames > EQ_FRAMES )
 		{
 			for( size_t chunk = 0; (chunk + 1) * EQ_FRAMES <= frames; chunk ++ )
 				Process( (float*) (((char*) buffer) + sizeof(*buffer) * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param );
 			return;
 		}
-		#endif
+#endif
 		
 		if( param )
 		{
@@ -1217,6 +1233,7 @@ public:
 	char Title[ 128 ];
 	char Artist[ 128 ];
 	char Album[ 128 ];
+	bool Verbose;
 	char Message[ 128 ];
 	time_t MessageUntil;
 	EqualizerParam *EQ;
@@ -1251,6 +1268,11 @@ public:
 		strcpy( Title, "Loading..." );
 		memset( Artist, 0, 128 );
 		memset( Album, 0, 128 );
+#ifdef WIN32
+		Verbose = false;
+#else
+		Verbose = true;
+#endif
 		memset( Message, 0, 128 );
 		MessageUntil = time(NULL) - 1;
 		EQ = NULL;
@@ -1262,15 +1284,49 @@ public:
 		return (HighRes ? sizeof(float) : sizeof(Sint16));
 	}
 	
-	void SetMessage( const char *message, int seconds )
+	void SetMessage( const char *message, int seconds = 4, bool to_stdout = true )
 	{
 		snprintf( Message, 128, "%s", message );
 		MessageUntil = time(NULL) + seconds;
+		
+		if( to_stdout && Verbose )
+			printf( "%s\n", message );
 	}
 	
 	void QueueSong( const char *filename )
 	{
 		Queue.push_back( filename );
+	}
+	
+	void PlaySong( const std::string &filename )
+	{
+		bool already_loaded = false;
+		
+		for( std::deque<Song*>::iterator song = Songs.begin(); song != Songs.end(); song ++ )
+		{
+			if( (*song)->Filename == filename )
+			{
+				already_loaded = true;
+				continue;
+			}
+			
+			(*song)->CurrentFrame = (*song)->TotalFrames;
+			(*song)->IntroBeats = 0;
+			(*song)->OutroBeats = 0;
+		}
+		
+		if( ! already_loaded )
+		{
+			std::deque<std::string>::iterator found = std::find( Queue.begin(), Queue.end(), filename );
+			if( found != Queue.end() )
+				Queue.erase( found );
+			Queue.push_front( filename );
+			
+			SetMessage( "Loading...", 4, false );
+		}
+		
+		// Throw away whatever we were loading unless it happens to be this song.
+		Loader.KeepThis = (Loader.Filename == filename);
 	}
 	
 	void CheckSongLoading( void )
@@ -1306,8 +1362,8 @@ public:
 					int min = ((int) sec ) / 60;
 					sec -= min * 60.;
 					
-					printf( "%s: %.2f BPM, Length %i:%04.1f, Start %.3f sec, Beats %i, Volume Avg %.2f Max %.2f\n", Loader.Filename.c_str(), song->BPM, min, sec, song->FirstBeatFrame / song->Audio.SampleRate, (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
-					fflush( stdout );
+					if( Verbose )
+						printf( "%s: %.2f BPM, Length %i:%04.1f, Start %.3f sec, Beats %i, Volume Avg %.2f Max %.2f\n", Loader.Filename.c_str(), song->BPM, min, sec, song->FirstBeatFrame / song->Audio.SampleRate, (int) song->Beats.size(), song->VolumeAverage, song->VolumeMax );
 					
 					bool first_song = Songs.empty();
 					
@@ -1320,6 +1376,10 @@ public:
 						Playing = true;
 						changed_song = true;
 					}
+					
+					// Stop saying "Loading" when it's loaded a song.
+					if( strcmp( Message, "Loading..." ) == 0 )
+						memset( Message, 0, sizeof(Message) );
 				}
 				
 				// If shuffle is enabled, shuffle the queue once per loop through.
@@ -1332,7 +1392,8 @@ public:
 						size_t dont_shuffle_end = std::min<size_t>( Queue.size(), Songs.size() );
 						std::random_shuffle( Queue.begin(), Queue.end() - dont_shuffle_end );
 						ShuffleDelay = Queue.size() - dont_shuffle_end - 1;
-						printf( "Shuffling next %i songs.\n", (int) ShuffleDelay + 1 );
+						if( Verbose )
+							printf( "Shuffling next %i songs.\n", (int) ShuffleDelay + 1 );
 					}
 				}
 				
@@ -1350,10 +1411,6 @@ public:
 					
 					Loader.StartLoading( song_name.c_str() );
 				}
-				
-				// Stop saying "Loading" when it's done.
-				if( strcmp( Message, "Loading..." ) == 0 )
-					memset( Message, 0, sizeof(Message) );
 			}
 			
 			// Update visualizer text.
@@ -1365,20 +1422,26 @@ public:
 				if( Songs.size() )
 				{
 					const Song *current_song = Songs.front();
-					const char *title = current_song->GetTag("title");
-					if( title )
-						snprintf( Title, 128, "%s", title );
-					const char *artist = current_song->GetTag("artist");
-					if( artist )
-						snprintf( Artist, 128, "%s", artist );
-					const char *album = current_song->GetTag("album");
-					if( album )
-						snprintf( Album, 128, "%s", album );
+					if( current_song->CurrentFrame < current_song->TotalFrames )
+					{
+						const char *title = current_song->GetTag("title");
+						if( title )
+							snprintf( Title, 128, "%s", title );
+						const char *artist = current_song->GetTag("artist");
+						if( artist )
+							snprintf( Artist, 128, "%s", artist );
+						const char *album = current_song->GetTag("album");
+						if( album )
+							snprintf( Album, 128, "%s", album );
+					}
 				}
 			}
 		}
 		else
+		{
 			Loader.Running = false;
+			Loader.KeepThis = false;
+		}
 	}
 	
 	float VisualizerAmpScale( void ) const
@@ -1438,22 +1501,25 @@ int SongLoaderThread( void *loader_ptr )
 	{
 		if( ! loader->Finished )
 		{
-			loader->LoadingSong = new Song( loader->Filename.c_str(), &(loader->Running) );
+			loader->LoadingSong = new Song( loader->Filename.c_str(), &(loader->KeepThis) );
 			
 			// Make sure it loaded okay.
-			if( loader->LoadingSong->Audio.Data && loader->LoadingSong->Audio.Size )
+			if( loader->KeepThis && loader->LoadingSong->Audio.Data && loader->LoadingSong->Audio.Size )
 			{
 				SDL_Delay( 1 );
 				loader->LoadingSong->Analyze();
 				
 				// Retry if junk got into the start of the audio and messed up analysis.
-				for( size_t retry = 0; (retry < 4) && (loader->LoadingSong->Beats.size() < 10); retry ++ )
+				for( size_t retry = 0; loader->KeepThis && (retry < 4) && (loader->LoadingSong->Beats.size() < 10); retry ++ )
 				{
 					SDL_Delay( 1 );
 					loader->LoadingSong->Analyze( loader->LoadingSong->FirstBeatFrame + 400 );
 				}
 			}
 			else
+				loader->KeepThis = false;
+			
+			if( ! loader->KeepThis )
 			{
 				// It didn't load correctly, so we won't queue it.  Memory cleanup.
 				delete loader->LoadingSong;
@@ -1693,7 +1759,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				ud->MostRecentToRemove = current_song;
 				
 				current_song = next_song;
-				next_song = (songs_size >= 3) ? ud->Songs.at( 2 ) : NULL;
+				next_song = (ud->Songs.size() >= 3) ? ud->Songs.at( 2 ) : NULL;
 				
 				volume = volume_next;
 				volume_next = (ud->VolumeMatching && next_song) ? ud->Volume * next_song->VolumeAdjustment() : ud->Volume;
@@ -1921,6 +1987,41 @@ std::deque<std::string> DirSongs( std::string path )
 	}
 	
 	return songs;
+}
+
+
+// --------------------------------------------------------------------------------------
+
+
+std::vector<std::string> SearchTerms;
+std::set<std::string> SearchResults;
+
+void UpdateSearch( UserData *ud )
+{
+	SearchResults.clear();
+	
+	if( !( SearchTerms.size() && SearchTerms.front().size() ) )
+		return;
+	
+	for( std::deque<std::string>::const_iterator song = ud->Queue.begin(); song != ud->Queue.end(); song ++ )
+	{
+		const char *song_str = song->c_str();
+		bool match = true;
+		
+		for( std::vector<std::string>::const_iterator term = SearchTerms.begin(); term != SearchTerms.end(); term ++ )
+		{
+			if( ! term->length() )
+				continue;
+			if( ! strcasestr( song_str, term->c_str() ) )
+			{
+				match = false;
+				break;
+			}
+		}
+		
+		if( match )
+			SearchResults.insert( *song );
+	}
 }
 
 
@@ -2213,6 +2314,10 @@ int main( int argc, char **argv )
 			}
 			else if( strncasecmp( argv[ i ], "--write=", strlen("--write=") ) == 0 )
 				write = argv[ i ] + strlen("--write=");
+			else if( strcasecmp( argv[ i ], "--verbose" ) == 0 )
+				userdata.Verbose = true;
+			else if( strcasecmp( argv[ i ], "--quiet" ) == 0 )
+				userdata.Verbose = false;
 			else
 				fprintf( stderr, "Unknown option: %s\n", argv[ i ] );
 		}
@@ -2235,9 +2340,9 @@ int main( int argc, char **argv )
 	if( ! paths.size() )
 	{
 		// If no music was dropped onto the icon or specified on the command-line, use default paths.
-		#ifdef WIN32
+#ifdef WIN32
 		paths.push_back( "M:\\iTunes\\iTunes Music\\Trance" );
-		#else
+#else
 		const char *home = getenv("HOME");
 		if( home )
 		{
@@ -2247,7 +2352,7 @@ int main( int argc, char **argv )
 			paths.push_back( path );
 		}
 		paths.push_back( "/Volumes/Media/Music/iTunes/iTunes Music/Trance" );
-		#endif
+#endif
 	}
 	
 	for( size_t i = 0; i < paths.size(); i ++ )
@@ -2273,6 +2378,7 @@ int main( int argc, char **argv )
 	{
 		SDL_WM_SetCaption( "Raptor007's AutoDJ", "AutoDJ" );
 		screen = fullscreen ? SDL_SetVideoMode( fullscreen_w, fullscreen_h, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256*zoom, 64*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+		SDL_ShowCursor( (fullscreen && visualizer) ? SDL_DISABLE : SDL_ENABLE );
 	}
 	
 	// Prepare audio file input.
@@ -2485,6 +2591,7 @@ int main( int argc, char **argv )
 	{
 		size_t prev_song_count = userdata.Songs.size();
 		size_t adding_songs = 0;
+		bool need_search_erase = SearchTerms.size() && ! userdata.Playing;
 		
 		userdata.CheckSongLoading();
 		
@@ -2542,8 +2649,6 @@ int main( int argc, char **argv )
 						
 						snprintf( visualizer_message, 128, "Added %i songs.", (int) adding_songs );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					
 					delete filename;
@@ -2552,7 +2657,120 @@ int main( int argc, char **argv )
 				{
 					SDLKey key = event.key.keysym.sym;
 					bool shift = event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT);
-					if( key == SDLK_q )
+					bool ctrl  = event.key.keysym.mod & (KMOD_LCTRL | KMOD_RCTRL | KMOD_LMETA | KMOD_RMETA | KMOD_LALT | KMOD_RALT);
+					
+					if( SearchTerms.size() && (key != SDLK_PAGEUP) && (key != SDLK_PAGEDOWN) && ! ctrl )
+					{
+						if( key == SDLK_ESCAPE )
+						{
+							SearchTerms.clear();
+							SDL_ShowCursor( (fullscreen && visualizer) ? SDL_DISABLE : SDL_ENABLE );
+						}
+						else if( (key == SDLK_RETURN) || (key == SDLK_KP_ENTER) )
+						{
+							if( SearchResults.size() )
+							{
+								userdata.PlaySong( *(SearchResults.begin()) );
+								
+								// Unpause when picking a new song from search.
+								if( ! userdata.Playing )
+								{
+									userdata.Playing = true;
+									if( sdl_audio )
+										SDL_PauseAudio( 0 );
+								}
+							}
+							SearchTerms.clear();
+							SDL_ShowCursor( (fullscreen && visualizer) ? SDL_DISABLE : SDL_ENABLE );
+						}
+						else if( (key == SDLK_BACKSPACE) || (key == SDLK_DELETE) )
+						{
+							if( SearchTerms.back().length() )
+							{
+								SearchTerms.back().erase( SearchTerms.back().end() - 1 );
+								UpdateSearch( &userdata );
+							}
+							else if( SearchTerms.size() > 1 )
+								SearchTerms.pop_back();
+						}
+						else if( key == SDLK_SPACE )
+						{
+							if( SearchTerms.back().length() )
+								SearchTerms.push_back("");
+						}
+						else if( (key == SDLK_LSHIFT) || (key == SDLK_RSHIFT)
+						||       (key == SDLK_LALT)   || (key == SDLK_RALT)
+						||       (key == SDLK_LCTRL)  || (key == SDLK_RCTRL)
+						||       (key == SDLK_LMETA)  || (key == SDLK_RMETA) )
+							;
+						else
+						{
+							char c = key;
+							
+							if( (key >= 'a') && (key <= 'z') ) // All-caps search query.
+								c += 'A' - 'a';
+							else if( (key >= SDLK_KP0) && (key <= SDLK_KP9) )
+								c += '0' - SDLK_KP0;
+							else if( key == SDLK_KP_PERIOD )
+								c = '.';
+							else if( key == SDLK_KP_MINUS )
+								c = '-';
+							else if( key == SDLK_KP_PLUS )
+								c = '+';
+							else if( key == SDLK_KP_MULTIPLY )
+								c = '*';
+							else if( key == SDLK_KP_DIVIDE )
+								c = '/';
+							else if( key == SDLK_KP_EQUALS )
+								c = '=';
+							else if( shift && (key == '`') )
+								c = '~';
+							else if( shift && (key == '1') )
+								c = '!';
+							else if( shift && (key == '2') )
+								c = '@';
+							else if( shift && (key == '3') )
+								c = '#';
+							else if( shift && (key == '4') )
+								c = '$';
+							else if( shift && (key == '5') )
+								c = '%';
+							else if( shift && (key == '6') )
+								c = '^';
+							else if( shift && (key == '7') )
+								c = '&';
+							else if( shift && (key == '8') )
+								c = '*';
+							else if( shift && (key == '9') )
+								c = '(';
+							else if( shift && (key == '0') )
+								c = ')';
+							else if( shift && (key == '-') )
+								c = '_';
+							else if( shift && (key == '=') )
+								c = '+';
+							else if( shift && (key == '[') )
+								c = '{';
+							else if( shift && (key == ']') )
+								c = '}';
+							else if( shift && (key == '\\') )
+								c = '|';
+							else if( shift && (key == ';') )
+								c = ':';
+							else if( shift && (key == '\'') )
+								c = '\"';
+							else if( shift && (key == ',') )
+								c = '<';
+							else if( shift && (key == '.') )
+								c = '>';
+							else if( shift && (key == '/') )
+								c = '?';
+							
+							SearchTerms.back() += c;
+							UpdateSearch( &userdata );
+						}
+					}
+					else if( key == SDLK_q )
 					{
 						userdata.Running = false;
 						if( sdl_audio )
@@ -2563,6 +2781,12 @@ int main( int argc, char **argv )
 						userdata.Playing = ! userdata.Playing;
 						if( sdl_audio )
 							SDL_PauseAudio( userdata.Playing ? 0 : 1 );
+					}
+					else if( (key == SDLK_RETURN) || (key == SDLK_KP_ENTER) )
+					{
+						SearchTerms.push_back("");
+						UpdateSearch( &userdata );
+						SDL_ShowCursor( SDL_ENABLE );
 					}
 					else if( key == SDLK_PAGEUP )
 					{
@@ -2647,32 +2871,28 @@ int main( int argc, char **argv )
 							if( same_drawto )
 								drawto = screen;
 						}
+						
+						SDL_ShowCursor( (fullscreen && visualizer) ? SDL_DISABLE : SDL_ENABLE );
 					}
-					else if( key == SDLK_MINUS )
+					else if( (key == SDLK_MINUS) || (key == SDLK_KP_MINUS) )
 					{
 						userdata.Volume *= pow( 2., shift ? -3./6. : -1./6. );
 						float db = 6. * log2(userdata.Volume);
-						snprintf( visualizer_message, 128, "Volume: %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Volume: %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
-					else if( key == SDLK_EQUALS )
+					else if( (key == SDLK_EQUALS) || (key == SDLK_KP_PLUS) )
 					{
 						userdata.Volume *= pow( 2., shift ? 3./6. : 1./6. );
 						float db = 6. * log2(userdata.Volume);
-						snprintf( visualizer_message, 128, "Volume: %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Volume: %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_BACKSPACE )
 					{
 						userdata.VolumeMatching = ! userdata.VolumeMatching;
-						snprintf( visualizer_message, 128, "Volume Matching: %s\n", userdata.VolumeMatching ? "On" : "Off" );
+						snprintf( visualizer_message, 128, "Volume Matching: %s", userdata.VolumeMatching ? "On" : "Off" );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_LEFTBRACKET || key == SDLK_LEFT )
 					{
@@ -2712,7 +2932,7 @@ int main( int argc, char **argv )
 								current_song->OutroBeats = std::min<int>( 64, current_song->TotalBeats() - beat );
 							}
 							if( userdata.Songs.size() < 2 )
-								userdata.SetMessage( "Loading...", 4 );
+								userdata.SetMessage( "Loading...", 4, false );
 						}
 					}
 					else if( key == SDLK_BACKSLASH )
@@ -2721,26 +2941,22 @@ int main( int argc, char **argv )
 						{
 							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
 							if( userdata.Songs.size() < 2 )
-								userdata.SetMessage( "Loading...", 4 );
+								userdata.SetMessage( "Loading...", 4, false );
 						}
 					}
 					else if( key == SDLK_k )
 					{
 						userdata.BPM -= 1.;
 						userdata.SourceBPM = false;
-						snprintf( visualizer_message, 128, "Playback BPM: %.0f\n", userdata.BPM );
+						snprintf( visualizer_message, 128, "Playback BPM: %.0f", userdata.BPM );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_l )
 					{
 						userdata.BPM += 1.;
 						userdata.SourceBPM = false;
-						snprintf( visualizer_message, 128, "Playback BPM: %.0f\n", userdata.BPM );
+						snprintf( visualizer_message, 128, "Playback BPM: %.0f", userdata.BPM );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_SEMICOLON || key == SDLK_DOWN )
 					{
@@ -2750,13 +2966,11 @@ int main( int argc, char **argv )
 						if( userdata.Songs.size() )
 						{
 							userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
-							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
 						}
 						else
-							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_QUOTE || key == SDLK_UP )
 					{
@@ -2766,28 +2980,25 @@ int main( int argc, char **argv )
 						if( userdata.Songs.size() )
 						{
 							userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
-							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
 						}
 						else
-							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s\n", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
+							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
 					}
 					else if( key == SDLK_i )
 					{
 						float source = userdata.Songs.size() ? userdata.Songs.front()->BPM : 0.;
 						float playback = userdata.SourceBPM ? source * userdata.SourcePitchScale : userdata.BPM;
-						snprintf( visualizer_message, 128, "Song %.1f BPM, Playback %.1f BPM\n", source, playback );
+						snprintf( visualizer_message, 128, "Song %.1f BPM, Playback %.1f BPM", source, playback );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
-					else if( key == SDLK_x )
+					else if( (key == SDLK_x) || (key == SDLK_KP0) )
 					{
 						if( userdata.CrossfadeOut )
 						{
 							userdata.CrossfadeOut = 0;
-							snprintf( visualizer_message, 128, "Crossfade Disabled\n" );
+							snprintf( visualizer_message, 128, "Crossfade Disabled" );
 						}
 						else
 						{
@@ -2795,11 +3006,9 @@ int main( int argc, char **argv )
 							if( ! userdata.CrossfadeIn )
 								userdata.CrossfadeIn = 96;
 							int beats = std::min<int>( userdata.CrossfadeIn, userdata.CrossfadeOut );
-							snprintf( visualizer_message, 128, "Crossfade: %i Beat%s\n", beats, (beats == 1) ? "" : "s" );
+							snprintf( visualizer_message, 128, "Crossfade: %i Beat%s", beats, (beats == 1) ? "" : "s" );
 						}
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_m )
 					{
@@ -2818,6 +3027,12 @@ int main( int argc, char **argv )
 							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() - (shift ? 128. : 32.) );
 							if( current_song->CurrentFrame < 0. )
 								current_song->CurrentFrame = 0.;
+							
+							double sec = current_song->CurrentSeconds();
+							int min = sec / 60.;
+							sec -= (min * 60.);
+							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
+							userdata.SetMessage( visualizer_message, 2, false );
 						}
 					}
 					else if( key == SDLK_PERIOD )
@@ -2826,22 +3041,26 @@ int main( int argc, char **argv )
 						{
 							Song *current_song = userdata.Songs.front();
 							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() + (shift ? 128. : 32.) );
+							
+							double sec = current_song->CurrentSeconds();
+							int min = sec / 60.;
+							sec -= (min * 60.);
+							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
+							userdata.SetMessage( visualizer_message, 2, false );
 						}
 					}
-					else if( key == SDLK_SLASH )
+					else if( (key == SDLK_SLASH) || (key == SDLK_KP_PERIOD) )
 					{
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale = shift ? (432./440.) : 1.;
 						if( userdata.Songs.size() )
 						{
 							userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
-							snprintf( visualizer_message, 128, "Pitch/BPM: %s (%.1f BPM)\n", shift ? "A440 to A432" : "Match Source", userdata.BPM );
+							snprintf( visualizer_message, 128, "Pitch/BPM: %s (%.1f BPM)", shift ? "A440 to A432" : "Match Source", userdata.BPM );
 						}
 						else
-							snprintf( visualizer_message, 128, "Pitch/BPM: %s\n", shift ? "A440 to A432" : "Match Source" );
+							snprintf( visualizer_message, 128, "Pitch/BPM: %s", shift ? "A440 to A432" : "Match Source" );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_v )
 					{
@@ -2870,6 +3089,8 @@ int main( int argc, char **argv )
 							SDL_UnlockSurface( screen );
 							SDL_UpdateRect( screen, 0, 0, screen->w, screen->h );
 						}
+						
+						SDL_ShowCursor( (fullscreen && visualizer) ? SDL_DISABLE : SDL_ENABLE );
 					}
 					else if( key == SDLK_f )
 					{
@@ -2952,22 +3173,20 @@ int main( int argc, char **argv )
 								userdata.EQ->FreqScale[  8000. ] = was_flat ? pow( 2., -2./6. ) : 1.;
 								userdata.EQ->FreqScale[ 16000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
 								
-								snprintf( visualizer_message, 128, "Equalizer: %s\n", was_flat ? "Earbuds" : "Flat" );
+								snprintf( visualizer_message, 128, "Equalizer: %s", was_flat ? "Earbuds" : "Flat" );
 							}
 							else
-								snprintf( visualizer_message, 128, "Equalizer: On\n" );
+								snprintf( visualizer_message, 128, "Equalizer: On" );
 						}
 						else
 						{
 							disabled_eq = userdata.EQ;
 							userdata.EQ = NULL;
 							
-							snprintf( visualizer_message, 128, "Equalizer: Off\n" );
+							snprintf( visualizer_message, 128, "Equalizer: Off" );
 						}
 						
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_1 )
 					{
@@ -2978,10 +3197,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 32. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 32Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 32Hz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_2 )
 					{
@@ -2992,10 +3209,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 64. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 64Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 64Hz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_3 )
 					{
@@ -3006,10 +3221,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 125. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 125Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 125Hz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_4 )
 					{
@@ -3020,10 +3233,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 250. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 250Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 250Hz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_5 )
 					{
@@ -3034,10 +3245,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 500. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 500Hz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 500Hz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_6 )
 					{
@@ -3048,10 +3257,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 1000. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 1KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 1KHz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_7 )
 					{
@@ -3062,10 +3269,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 2000. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 2KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 2KHz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_8 )
 					{
@@ -3076,10 +3281,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 4000. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 4KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 4KHz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_9 )
 					{
@@ -3090,10 +3293,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 8000. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 8KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 8KHz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_0 )
 					{
@@ -3104,10 +3305,8 @@ int main( int argc, char **argv )
 						userdata.EQ->FreqScale[ 16000. ] = scale;
 						float db = 6. * log2(scale);
 						
-						snprintf( visualizer_message, 128, "Equalizer: 16KHz %s%.0fdB\n", (db >= 0.) ? "+" : "", db );
+						snprintf( visualizer_message, 128, "Equalizer: 16KHz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 					else if( key == SDLK_r )
 					{
@@ -3127,13 +3326,11 @@ int main( int argc, char **argv )
 						}
 						
 						if( userdata.Reverb )
-							snprintf( visualizer_message, 128, "Reverb Bounce: %0.1f%%\n", userdata.Reverb->BounceEnergy * 100. );
+							snprintf( visualizer_message, 128, "Reverb Bounce: %0.1f%%", userdata.Reverb->BounceEnergy * 100. );
 						else
-							snprintf( visualizer_message, 128, "Reverb: Off\n" );
+							snprintf( visualizer_message, 128, "Reverb: Off" );
 						
 						userdata.SetMessage( visualizer_message, 4 );
-						printf( "%s", visualizer_message );
-						fflush( stdout );
 					}
 				}
 			}
@@ -3658,6 +3855,61 @@ int main( int argc, char **argv )
 				font2.Draw( 2, drawto->h - font2.CharH, userdata.Message );
 		}
 		
+		if( pixels && need_search_erase )
+		{
+			Uint32 bg = (visualizer || fullscreen) ? SDL_MapRGB( screen->format, 0x00, 0x00, 0x00 ) : SDL_MapRGB( screen->format, 0xFF, 0xFF, 0xFF );
+			
+			for( int x = 0                  ; x < drawto->w; x ++ )
+			for( int y = 3 + font2.CharH * 2; y < drawto->h; y ++ )
+			{
+				pixels[ y * drawto->w + x ] = bg;
+			}
+		}
+		
+		// If we're actively searching, draw that even when paused.
+		if( pixels && SearchTerms.size() )
+		{
+			int x = 5 + font2.CharW;
+			int y = 5 + font2.CharH * 2;
+			const char *prompt = ">";
+			if( ! userdata.Loader.Finished )
+			{
+				long phase = (clock() * 8L / CLOCKS_PER_SEC) % 4L;
+				prompt = "|";
+				if( phase == 1 )
+					prompt = "/";
+				else if( phase == 2 )
+					prompt = "-";
+				else if( phase == 3 )
+					prompt = "\\";
+			}
+			font2.Draw( 2, y, prompt );
+			
+			for( std::vector<std::string>::const_iterator term = SearchTerms.begin(); term != SearchTerms.end(); term ++ )
+			{
+				font2.Draw( x, y, term->c_str() );
+				x += (term->length() + 1) * font2.CharW;
+			}
+			
+			if( time(NULL) % 2 )
+				font2.Draw( x - (font2.CharW * 5) / 4, y, "|" );
+			
+			y += 3;
+			for( std::set<std::string>::const_iterator result = SearchResults.begin(); result != SearchResults.end(); result ++ )
+			{
+				y += font2.CharH;
+				if( y > drawto->h )
+					break;
+				
+				const char *result_str = result->c_str();
+				const char *this_slash = NULL;
+				while(( this_slash = strstr( result_str, PATH_SEPARATOR ) ))
+					result_str = this_slash + 1;
+				
+				font2.Draw( 2, y, result_str );
+			}
+		}
+		
 		// Finish drawing.
 		if( pixels )
 		{
@@ -3713,18 +3965,21 @@ int main( int argc, char **argv )
 	
 	// Cleanup before quitting.
 	userdata.Loader.Running = userdata.Running;
+	userdata.Loader.KeepThis = userdata.Loader.Running;
 	av_fft_end( visualizer_fft_context );
 	av_free( visualizer_fft_complex_l );
 	av_free( visualizer_fft_complex_r );
 	if( ! userdata.Loader.Finished )
 	{
-		printf( "Waiting for loader thread...\n" );
+		if( userdata.Verbose )
+			printf( "Waiting for loader thread...\n" );
 		size_t wait_count = 0;
 		while( ! userdata.Loader.Finished )
 		{
 			if( wait_count >= 10 )
 			{
-				printf( "Loader thread took too long!  Giving up on it...\n" );
+				if( userdata.Verbose )
+					printf( "Loader thread took too long!  Giving up on it...\n" );
 				break;
 			}
 			SDL_Delay( 1000 );
@@ -3748,7 +4003,8 @@ int main( int argc, char **argv )
 	}
 	SDL_Quit();
 	
-	printf( "Done quitting.\n" );
+	if( userdata.Verbose )
+		printf( "Done quitting.\n" );
 	
 	return 0;
 }

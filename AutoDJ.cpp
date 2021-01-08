@@ -2698,6 +2698,13 @@ int main( int argc, char **argv )
 							if( SearchTerms.back().length() )
 								SearchTerms.push_back("");
 						}
+						else if( key == SDLK_UP )
+							UpdateSearch( &userdata );
+						else if( key == SDLK_DOWN )
+						{
+							if( SearchResults.size() > 1 )
+								SearchResults.erase( SearchResults.begin() );
+						}
 						else if( (key == SDLK_LSHIFT) || (key == SDLK_RSHIFT)
 						||       (key == SDLK_LALT)   || (key == SDLK_RALT)
 						||       (key == SDLK_LCTRL)  || (key == SDLK_RCTRL)
@@ -3168,7 +3175,7 @@ int main( int argc, char **argv )
 								userdata.EQ->FreqScale[   250. ] = 1.;
 								userdata.EQ->FreqScale[   500. ] = 1.;
 								userdata.EQ->FreqScale[  1000. ] = 1.;
-								userdata.EQ->FreqScale[  2000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  2000. ] = 1.;
 								userdata.EQ->FreqScale[  4000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
 								userdata.EQ->FreqScale[  8000. ] = was_flat ? pow( 2., -2./6. ) : 1.;
 								userdata.EQ->FreqScale[ 16000. ] = was_flat ? pow( 2., -1./6. ) : 1.;

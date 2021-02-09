@@ -103,6 +103,8 @@ public:
 	int IntroBeats, OutroBeats;
 	std::map<size_t,double> Beats;
 	float VolumeMax, VolumeAverage;
+	Uint8 ChannelMap[ 6 ];
+	float ChannelVolume[ 6 ];
 	volatile bool *RunningPtr;
 	
 	Song( const char *filename, volatile bool *running_ptr )
@@ -119,6 +121,8 @@ public:
 		OutroBeats = 128;
 		VolumeMax = 1.;
 		VolumeAverage = 0.25;
+		memset( &ChannelMap, 0, sizeof(ChannelMap) );
+		memset( &ChannelVolume, 0, sizeof(ChannelVolume) );
 		RunningPtr = running_ptr;
 		
 		if( AlwaysLoadFloat )
@@ -133,6 +137,11 @@ public:
 				Audio.Clear();
 				TotalFrames = 0;
 			}
+			
+			for( size_t i = 0; i < 6; i ++ )
+				ChannelMap[ i ] = i % Audio.Channels;
+			
+			SetSurroundVolume( 0.f );
 		}
 		else
 			TotalFrames = 0;
@@ -154,6 +163,10 @@ public:
 		}
 	}
 	
+	~Song()
+	{
+	}
+	
 	const char *GetTag( const std::string &name ) const
 	{
 		std::map<std::string,std::string>::const_iterator tag = Audio.Tags.find(name);
@@ -162,8 +175,10 @@ public:
 		return NULL;
 	}
 	
-	~Song()
+	void SetSurroundVolume( float surround )
 	{
+		for( size_t i = 0; i < 6; i ++ )
+			ChannelVolume[ i ] = (i < Audio.Channels) ? 1.f : surround;
 	}
 	
 	double CurrentSeconds( void ) const
@@ -223,14 +238,13 @@ public:
 	
 	float NearestFrame( Uint8 channel ) const
 	{
-		return SampleAtIndex( Audio.Channels * (size_t)(CurrentFrame + 0.5) + channel % Audio.Channels );
+		return SampleAtIndex( Audio.Channels * (size_t)(CurrentFrame + 0.5) + ChannelMap[ channel ] ) * ChannelVolume[ channel ];
 	}
 	
 	float CubicFrame( Uint8 channel ) const
 	{
-		channel %= Audio.Channels;
 		size_t a_frame = (size_t) CurrentFrame;
-		size_t a_index = Audio.Channels * a_frame + channel;
+		size_t a_index = Audio.Channels * a_frame + ChannelMap[ channel ];
 		size_t b_index = a_index + Audio.Channels;
 		long prev_index = a_index - Audio.Channels;
 		size_t next_index = b_index + Audio.Channels;
@@ -248,7 +262,7 @@ public:
 		*/
 		// Paul Breeuwsma came up with a simpler cubic interpolation than mine, so I'm using it.
 		// http://www.paulinternet.nl/?page=bicubic
-		return a + 0.5f * b_part * (b - prev + b_part * (2.f * prev - 5.f * a + 4.f * b - next + b_part * (3.f * (a - b) + next - prev)));
+		return (a + 0.5f * b_part * (b - prev + b_part * (2.f * prev - 5.f * a + 4.f * b - next + b_part * (3.f * (a - b) + next - prev)))) * ChannelVolume[ channel ];
 	}
 	
 	void Advance( double playback_bpm, int playback_rate )
@@ -1041,16 +1055,16 @@ public:
 	
 	ReverbParam( void )
 	{
-		SpeakerSide = 1.5;
-		SpeakerFront = 0.5;
-		SideWall = 3;
-		FrontWall = 3;
-		BackWall = 3;
-		Ceiling = 2;
-		Floor = 1;
+		SpeakerSide = 1.0;
+		SpeakerFront = 3.2;
+		SideWall = 2.5;
+		FrontWall = 4.2;
+		BackWall = 0.8;
+		Ceiling = 1.4;
+		Floor = 0.9;
 		HeadWidth = 0.15;
 		BehindScale = 0.5;
-		BounceEnergy = 0.375;
+		BounceEnergy = 0.4375;
 	}
 	~ReverbParam(){}
 	
@@ -1061,12 +1075,11 @@ public:
 	
 	float BouncedDist( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
 	{
-		float x = SpeakerSide - HeadWidth / 2.f;
+		float x = SpeakerSide;
 		if( x_bounces % 2 )
 			x += 2 * (opposite ? SideWall : SideWall - SpeakerSide);
 		x += (x_bounces / 2) * SideWall * 4;
-		if( opposite && ! x_bounces )
-			x += HeadWidth;
+		x += HeadWidth * (opposite ? 0.5f : -0.5f);
 		
 		float y = SpeakerFront;
 		if( y_bounces % 2 )
@@ -1078,20 +1091,34 @@ public:
 			z += 2 * (up ? Ceiling : Floor);
 		z += (z_bounces / 2) * (Ceiling + Floor) * 2;
 		
-		return sqrt( x * x + y * y + z * z ) - SpeakerDist();
+		return sqrt( x * x + y * y + z * z );
 	}
 	
 	float AmpScale( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
 	{
+		if( !(x_bounces || y_bounces || z_bounces) )
+			return 0.f;
+		if( opposite && ! x_bounces )
+			return 0.f;
 		float bounced = BouncedDist( x_bounces, y_bounces, z_bounces, up, opposite );
 		float speaker = SpeakerDist();
-		float scale = pow( BounceEnergy, x_bounces + y_bounces + z_bounces ) * speaker / (bounced + speaker);
-		scale *= pow( 0.75, up ? (z_bounces / 2) : ((z_bounces + 1) / 2) ); // Carpet on the floor.
+		float scale = pow( 0.5, bounced / speaker ) * pow( BounceEnergy, x_bounces + y_bounces + z_bounces );
 		if( y_bounces % 2 ) // Arriving from behind.
 			scale *= pow( BehindScale, y_bounces / (float)(x_bounces + y_bounces) );
-		if( opposite && ! x_bounces )
-			scale *= SpeakerFront / sqrt( SpeakerSide * SpeakerSide + SpeakerFront * SpeakerFront );
 		return scale;
+	}
+	
+	void AddBounce( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite, float speaker, int rate )
+	{
+		float amp_scale = AmpScale( x_bounces, y_bounces, z_bounces, up, opposite );
+		if( amp_scale )
+		{
+			size_t frames_back = (BouncedDist( x_bounces, y_bounces, z_bounces, up, opposite ) - speaker) * rate / 344.;
+			if( opposite )
+				OppoSide.push_back( ReverbBounce( frames_back, amp_scale ) );
+			else
+				SameSide.push_back( ReverbBounce( frames_back, amp_scale ) );
+		}
 	}
 	
 	void Setup( unsigned int rate )
@@ -1099,20 +1126,18 @@ public:
 		SameSide.clear();
 		OppoSide.clear();
 		
+		float speaker = SpeakerDist();
+		
 		for( int xb = 0; xb <= 5; xb ++ )
 		{
-			for( int yb = 0; yb <= 5; yb ++ )
+			for( int yb = 0; yb <= 4; yb ++ )
 			{
-				if( xb || yb )
-					SameSide.push_back( ReverbBounce( BouncedDist( xb, yb,  0, false, false ) * rate / 343., AmpScale( xb, yb,  0, false, false ) ) );
-				OppoSide.push_back( ReverbBounce( BouncedDist( xb, yb,  0, false, true  ) * rate / 343., AmpScale( xb, yb,  0, false, true  ) ) );
-				
-				for( int zb = 1; zb <= 2; zb ++ )
+				for( int zb = 0; zb <= 4; zb ++ )
 				{
-					SameSide.push_back( ReverbBounce( BouncedDist( xb, yb, zb, false, false ) * rate / 343., AmpScale( xb, yb, zb, false, false ) ) );
-					SameSide.push_back( ReverbBounce( BouncedDist( xb, yb, zb, true,  false ) * rate / 343., AmpScale( xb, yb, zb, true,  false ) ) );
-					OppoSide.push_back( ReverbBounce( BouncedDist( xb, yb, zb, false, true  ) * rate / 343., AmpScale( xb, yb, zb, false, true  ) ) );
-					OppoSide.push_back( ReverbBounce( BouncedDist( xb, yb, zb, true,  true  ) * rate / 343., AmpScale( xb, yb, zb, true,  true  ) ) );
+					AddBounce( xb, yb, zb, false, false, speaker, rate );
+					AddBounce( xb, yb, zb, true,  false, speaker, rate );
+					AddBounce( xb, yb, zb, false, true,  speaker, rate );
+					AddBounce( xb, yb, zb, true,  true,  speaker, rate );
 				}
 			}
 		}
@@ -1216,6 +1241,7 @@ public:
 	int CrossfadeOut;
 	float Volume;
 	bool VolumeMatching;
+	float Surround;
 	bool Repeat;
 	bool Shuffle;
 	size_t ShuffleDelay;
@@ -1251,8 +1277,9 @@ public:
 		SourcePitchScale = 1.;
 		CrossfadeIn = 96;
 		CrossfadeOut = 128;
-		Volume = 1.;
+		Volume = 1.f;
 		VolumeMatching = true;
+		Surround = 0.f;
 		Repeat = true;
 		Shuffle = true;
 		ShuffleDelay = 0;
@@ -1356,6 +1383,7 @@ public:
 				// Make sure the song loaded okay.
 				if( song )
 				{
+					song->SetSurroundVolume( Surround );
 					song->SetIntroOutroBeats( CrossfadeIn, CrossfadeOut );
 					
 					double sec = song->TotalSeconds();
@@ -1479,8 +1507,9 @@ public:
 		return 1.f / volume;
 	}
 	
-	float VisualizerSample( size_t index ) const
+	float VisualizerSample( size_t frame, size_t channel ) const
 	{
+		size_t index = frame * Spec.channels + channel;
 		if( ! HighRes )
 			return (((Sint16*)( VisualizerBuffer ))[ index % (VisualizerBufferSize / sizeof(Sint16)) ] / 32768.f) * VisualizerAmpScale();
 		return ((float*)( VisualizerBuffer ))[ index % (VisualizerBufferSize / sizeof(float)) ] * VisualizerAmpScale();
@@ -1795,7 +1824,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 				for( int channel = 0; channel < ud->Spec.channels; channel ++ )
 				{
 					if( (ud->Metronome == 2) || (ipart % ud->Spec.channels == channel) )
-						streamF[ i + channel ] = streamF[ i + channel ] + wave_value;
+						streamF[ i + channel ] += wave_value;
 				}
 			}
 		}
@@ -2271,13 +2300,13 @@ int main( int argc, char **argv )
 			else if( strcasecmp( argv[ i ], "--reverb" ) == 0 )
 			{
 				userdata.Reverb = new ReverbParam();
-				userdata.Reverb->Setup( 44100 );
+				userdata.Reverb->Setup( want.freq );
 			}
 			else if( strncasecmp( argv[ i ], "--reverb=", strlen("--reverb=") ) == 0 )
 			{
 				userdata.Reverb = new ReverbParam();
 				userdata.Reverb->BounceEnergy = atof( argv[ i ] + strlen("--reverb=") );
-				userdata.Reverb->Setup( 44100 );
+				userdata.Reverb->Setup( want.freq );
 			}
 			else if( strcasecmp( argv[ i ], "--sdl-audio" ) == 0 )
 				sdl_audio = true;
@@ -2291,6 +2320,12 @@ int main( int argc, char **argv )
 				want.freq = atoi( argv[ i ] + strlen("--rate=") );
 			else if( strncasecmp( argv[ i ], "--channels=", strlen("--channels=") ) == 0 )
 				want.channels = atoi( argv[ i ] + strlen("--channels=") );
+			else if( strncasecmp( argv[ i ], "--surround=", strlen("--surround=") ) == 0 )
+			{
+				userdata.Surround = atof( argv[ i ] + strlen("--surround=") );
+				if( want.channels < 4 )
+					want.channels = 4;
+			}
 			else if( strncasecmp( argv[ i ], "--buffer1=", strlen("--buffer1=") ) == 0 )
 			{
 				want.samples = atoi( argv[ i ] + strlen("--buffer1=") );
@@ -2409,34 +2444,50 @@ int main( int argc, char **argv )
 			if( wave_out_devices )
 			{
 				// Start WaveOut.
-				WAVEFORMATEX wfx;
-				memset( &wfx, 0, sizeof(WAVEFORMATEX) );
-				wfx.nChannels = want.channels;
-				wfx.nSamplesPerSec = want.freq;
-				wfx.cbSize = 0;
+				WAVEFORMATEXTENSIBLE wfx;
+				memset( &wfx, 0, sizeof(wfx) );
+				wfx.Format.cbSize = 0;
+				wfx.Format.nSamplesPerSec = want.freq;
+				wfx.Format.nChannels = want.channels;
+				wfx.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+				if( want.channels > 2 )
+				{
+					wfx.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+					wfx.Format.cbSize = sizeof(wfx) - sizeof(wfx.Format);
+					if( want.channels >= 4 )
+						wfx.dwChannelMask |= SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT;
+					if( want.channels >= 6 )
+						wfx.dwChannelMask |= SPEAKER_SIDE_LEFT | SPEAKER_SIDE_RIGHT;
+				}
 				MMRESULT wave_out_result = ~MMSYSERR_NOERROR;
 				if( userdata.HighRes )
 				{
-					wfx.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-					wfx.wBitsPerSample = 32;
-					wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
-					wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
-					wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+					if( ! wfx.Format.cbSize )
+						wfx.Format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+					wfx.SubFormat = {0x00000003,0x0000,0x0010,0x80,0x00,0x00,0xAA,0x00,0x38,0x9B,0x71}; //KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+					wfx.Format.wBitsPerSample = 32;
+					wfx.Samples.wValidBitsPerSample = wfx.Format.wBitsPerSample;
+					wfx.Format.nBlockAlign = wfx.Format.nChannels * wfx.Format.wBitsPerSample / 8;
+					wfx.Format.nAvgBytesPerSec = wfx.Format.nBlockAlign * wfx.Format.nSamplesPerSec;
+					wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &(wfx.Format), (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
 				}
 				if( wave_out_result != MMSYSERR_NOERROR )
 				{
-					wfx.wFormatTag = WAVE_FORMAT_PCM;
-					wfx.wBitsPerSample = 16;
-					wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
-					wfx.nAvgBytesPerSec = wfx.nBlockAlign * wfx.nSamplesPerSec;
-					wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &wfx, (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
+					if( ! wfx.Format.cbSize )
+						wfx.Format.wFormatTag = WAVE_FORMAT_PCM;
+					wfx.SubFormat = {0x00000001,0x0000,0x0010,0x80,0x00,0x00,0xAA,0x00,0x38,0x9B,0x71}; //KSDATAFORMAT_SUBTYPE_PCM
+					wfx.Format.wBitsPerSample = 16;
+					wfx.Samples.wValidBitsPerSample = wfx.Format.wBitsPerSample;
+					wfx.Format.nBlockAlign = wfx.Format.nChannels * wfx.Format.wBitsPerSample / 8;
+					wfx.Format.nAvgBytesPerSec = wfx.Format.nBlockAlign * wfx.Format.nSamplesPerSec;
+					wave_out_result = waveOutOpen( &WaveOutHandle, WAVE_MAPPER, &(wfx.Format), (DWORD_PTR) &WaveOutCallback, 0, CALLBACK_FUNCTION );
 					if( wave_out_result == MMSYSERR_NOERROR )
 						userdata.HighRes = false;
 				}
 				if( wave_out_result == MMSYSERR_NOERROR )
 				{
 					// Allocate 2 output buffers.
-					WaveOutBufferSize = want.samples * wfx.nChannels * wfx.wBitsPerSample / 8;
+					WaveOutBufferSize = want.samples * wfx.Format.nChannels * wfx.Format.wBitsPerSample / 8;
 					WaveOutBuffers[ 0 ] = (Uint8*) malloc( WaveOutBufferSize );
 					WaveOutBuffers[ 1 ] = (Uint8*) malloc( WaveOutBufferSize );
 					memset( WaveOutBuffers[ 0 ], 0, WaveOutBufferSize );
@@ -2469,6 +2520,8 @@ int main( int argc, char **argv )
 #endif
 		if( sdl_audio )
 		{
+			if( want.channels > 2 )
+				want.channels = 2;
 			userdata.HighRes = false;
 			SDL_OpenAudio( &want, &(userdata.Spec) );
 			
@@ -2480,6 +2533,7 @@ int main( int argc, char **argv )
 		}
 	}
 	
+	int front_channels = std::min<int>( 2, userdata.Spec.channels );
 	size_t bytes_per_sample = userdata.BytesPerSample();
 	
 	// Automatic buffer2 is number of bytes, based on data rate.
@@ -2489,7 +2543,7 @@ int main( int argc, char **argv )
 	if( write )
 	{
 		// Write WAV header.
-		unsigned char wave_header[ 44 ] = { 'R','I','F','F', 36,0xFF,0xFF,0x7F, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, (userdata.HighRes?3:1),0, userdata.Spec.channels,0, userdata.Spec.freq%256,userdata.Spec.freq/256,0,0, (userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)%256,(userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)/256,0,0, userdata.Spec.channels*bytes_per_sample,0, 8*bytes_per_sample,0, 'd','a','t','a', 0,0xFF,0xFF,0x7F };
+		unsigned char wave_header[ 44 ] = { 'R','I','F','F', 36,0xFF,0xFF,0x7F, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, (userdata.HighRes?3:1),0, userdata.Spec.channels,0, userdata.Spec.freq&0xFF,(userdata.Spec.freq>>8)&0xFF,(userdata.Spec.freq>>16)&0xFF,(userdata.Spec.freq>>24)&0xFF, (userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)&0xFF,((userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)>>8)&0xFF,((userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)>>16)&0xFF,((userdata.Spec.freq*userdata.Spec.channels*bytes_per_sample)>>24)&0xFF, userdata.Spec.channels*bytes_per_sample,0, 8*bytes_per_sample,0, 'd','a','t','a', 0,0xFF,0xFF,0x7F };
 		userdata.WriteTo = fopen( write, "wb" );
 		fwrite( wave_header, 1, 44, userdata.WriteTo );
 		fflush( userdata.WriteTo );
@@ -2516,7 +2570,10 @@ int main( int argc, char **argv )
 	// Keep track of disabled reverb parameters for toggling.
 	ReverbParam *disabled_reverb = userdata.Reverb;
 	if( ! disabled_reverb )
+	{
 		disabled_reverb = new ReverbParam();
+		disabled_reverb->Setup( userdata.Spec.freq );
+	}
 	
 	// Visualizer variables.
 	SDL_Surface *drawto = screen;
@@ -2659,6 +2716,7 @@ int main( int argc, char **argv )
 					bool shift = event.key.keysym.mod & (KMOD_LSHIFT | KMOD_RSHIFT);
 					bool ctrl  = event.key.keysym.mod & (KMOD_LCTRL | KMOD_RCTRL | KMOD_LMETA | KMOD_RMETA | KMOD_LALT | KMOD_RALT);
 					
+					// Search
 					if( SearchTerms.size() && (key != SDLK_PAGEUP) && (key != SDLK_PAGEDOWN) && ! ctrl )
 					{
 						if( key == SDLK_ESCAPE )
@@ -2777,6 +2835,14 @@ int main( int argc, char **argv )
 							UpdateSearch( &userdata );
 						}
 					}
+					else if( (key == SDLK_RETURN) || (key == SDLK_KP_ENTER) )
+					{
+						SearchTerms.push_back("");
+						UpdateSearch( &userdata );
+						SDL_ShowCursor( SDL_ENABLE );
+					}
+					
+					// On/Off
 					else if( key == SDLK_q )
 					{
 						userdata.Running = false;
@@ -2789,12 +2855,8 @@ int main( int argc, char **argv )
 						if( sdl_audio )
 							SDL_PauseAudio( userdata.Playing ? 0 : 1 );
 					}
-					else if( (key == SDLK_RETURN) || (key == SDLK_KP_ENTER) )
-					{
-						SearchTerms.push_back("");
-						UpdateSearch( &userdata );
-						SDL_ShowCursor( SDL_ENABLE );
-					}
+					
+					// Window
 					else if( key == SDLK_PAGEUP )
 					{
 						int zoom = (screen->w / drawto->w) + 1;
@@ -2881,6 +2943,8 @@ int main( int argc, char **argv )
 						
 						SDL_ShowCursor( (fullscreen && visualizer) ? SDL_DISABLE : SDL_ENABLE );
 					}
+					
+					// Volume
 					else if( (key == SDLK_MINUS) || (key == SDLK_KP_MINUS) )
 					{
 						userdata.Volume *= pow( 2., shift ? -3./6. : -1./6. );
@@ -2901,6 +2965,50 @@ int main( int argc, char **argv )
 						snprintf( visualizer_message, 128, "Volume Matching: %s", userdata.VolumeMatching ? "On" : "Off" );
 						userdata.SetMessage( visualizer_message, 4 );
 					}
+					
+					// Surround
+					else if( key == SDLK_KP_MULTIPLY )
+					{
+						if( ! userdata.Surround )
+							userdata.Surround = shift ? 0.25f : 0.125f;
+						else if( shift )
+							userdata.Surround = 0.f;
+						else
+							userdata.Surround *= pow( 2., 1./6. );
+						
+						for( std::deque<Song*>::iterator song = userdata.Songs.begin(); song != userdata.Songs.end(); song ++ )
+							(*song)->SetSurroundVolume( userdata.Surround );
+						
+						if( userdata.Surround && (userdata.Spec.channels > 2) )
+						{
+							float db = 6. * log2(userdata.Surround);
+							snprintf( visualizer_message, 128, "Surround: %s%.0fdB", (db >= 0.) ? "+" : "", db );
+						}
+						else
+							snprintf( visualizer_message, 128, "Surround Disabled" );
+						userdata.SetMessage( visualizer_message, 2, false );
+					}
+					else if( key == SDLK_KP_DIVIDE )
+					{
+						if( shift )
+							userdata.Surround = 0.f;
+						else if( userdata.Surround )
+							userdata.Surround *= pow( 2., -1./6. );
+						
+						for( std::deque<Song*>::iterator song = userdata.Songs.begin(); song != userdata.Songs.end(); song ++ )
+							(*song)->SetSurroundVolume( userdata.Surround );
+						
+						if( userdata.Surround && (userdata.Spec.channels > 2) )
+						{
+							float db = 6. * log2(userdata.Surround);
+							snprintf( visualizer_message, 128, "Surround: %s%.0fdB", (db >= 0.) ? "+" : "", db );
+						}
+						else
+							snprintf( visualizer_message, 128, "Surround Disabled" );
+						userdata.SetMessage( visualizer_message, 2, false );
+					}
+					
+					// Track
 					else if( key == SDLK_LEFTBRACKET || key == SDLK_LEFT )
 					{
 						size_t songs_size = userdata.Songs.size();
@@ -2909,7 +3017,6 @@ int main( int argc, char **argv )
 							Song *current_song = userdata.Songs.front();
 							current_song->CurrentFrame = 0.;
 							current_song->FirstOutroFrame = 0.;
-							current_song->SetIntroOutroBeats( userdata.CrossfadeIn, userdata.CrossfadeOut );
 							
 							if( songs_size >= 2 )
 								userdata.Songs.at( 1 )->CurrentFrame = 0;
@@ -2942,6 +3049,38 @@ int main( int argc, char **argv )
 								userdata.SetMessage( "Loading...", 4, false );
 						}
 					}
+					else if( key == SDLK_COMMA )
+					{
+						if( userdata.Songs.size() )
+						{
+							Song *current_song = userdata.Songs.front();
+							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() - (shift ? 128. : 32.) );
+							if( current_song->CurrentFrame < 0. )
+								current_song->CurrentFrame = 0.;
+							
+							double sec = current_song->CurrentSeconds();
+							int min = sec / 60.;
+							sec -= (min * 60.);
+							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
+							userdata.SetMessage( visualizer_message, 2, false );
+						}
+					}
+					else if( key == SDLK_PERIOD )
+					{
+						if( userdata.Songs.size() )
+						{
+							Song *current_song = userdata.Songs.front();
+							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() + (shift ? 128. : 32.) );
+							
+							double sec = current_song->CurrentSeconds();
+							int min = sec / 60.;
+							sec -= (min * 60.);
+							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
+							userdata.SetMessage( visualizer_message, 2, false );
+						}
+					}
+					
+					// Speed
 					else if( key == SDLK_BACKSLASH )
 					{
 						if( userdata.Songs.size() )
@@ -3006,6 +3145,9 @@ int main( int argc, char **argv )
 						{
 							userdata.CrossfadeOut = 0;
 							snprintf( visualizer_message, 128, "Crossfade Disabled" );
+							
+							if( userdata.Songs.size() >= 2 )
+								userdata.Songs.at( 1 )->CurrentFrame = 0;
 						}
 						else
 						{
@@ -3015,46 +3157,9 @@ int main( int argc, char **argv )
 							int beats = std::min<int>( userdata.CrossfadeIn, userdata.CrossfadeOut );
 							snprintf( visualizer_message, 128, "Crossfade: %i Beat%s", beats, (beats == 1) ? "" : "s" );
 						}
+						for( std::deque<Song*>::iterator song = userdata.Songs.begin(); song != userdata.Songs.end(); song ++ )
+							(*song)->SetIntroOutroBeats( userdata.CrossfadeIn, userdata.CrossfadeOut );
 						userdata.SetMessage( visualizer_message, 4 );
-					}
-					else if( key == SDLK_m )
-					{
-						if( userdata.Metronome )
-							userdata.Metronome = 0;
-						else if( shift )
-							userdata.Metronome = 2;
-						else
-							userdata.Metronome = 1;
-					}
-					else if( key == SDLK_COMMA )
-					{
-						if( userdata.Songs.size() )
-						{
-							Song *current_song = userdata.Songs.front();
-							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() - (shift ? 128. : 32.) );
-							if( current_song->CurrentFrame < 0. )
-								current_song->CurrentFrame = 0.;
-							
-							double sec = current_song->CurrentSeconds();
-							int min = sec / 60.;
-							sec -= (min * 60.);
-							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
-							userdata.SetMessage( visualizer_message, 2, false );
-						}
-					}
-					else if( key == SDLK_PERIOD )
-					{
-						if( userdata.Songs.size() )
-						{
-							Song *current_song = userdata.Songs.front();
-							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() + (shift ? 128. : 32.) );
-							
-							double sec = current_song->CurrentSeconds();
-							int min = sec / 60.;
-							sec -= (min * 60.);
-							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
-							userdata.SetMessage( visualizer_message, 2, false );
-						}
 					}
 					else if( (key == SDLK_SLASH) || (key == SDLK_KP_PERIOD) )
 					{
@@ -3069,6 +3174,8 @@ int main( int argc, char **argv )
 							snprintf( visualizer_message, 128, "Pitch/BPM: %s", shift ? "A440 to A432" : "Match Source" );
 						userdata.SetMessage( visualizer_message, 4 );
 					}
+					
+					// Visualizer
 					else if( key == SDLK_v )
 					{
 						if( screen )
@@ -3157,6 +3264,8 @@ int main( int argc, char **argv )
 						visualizer_color_cycle = shift ? 8 : 16;
 						visualizer_text = true;
 					}
+					
+					// Equalizer
 					else if( key == SDLK_e )
 					{
 						if( shift || ! userdata.EQ )
@@ -3315,6 +3424,8 @@ int main( int argc, char **argv )
 						snprintf( visualizer_message, 128, "Equalizer: 16KHz %s%.0fdB", (db >= 0.) ? "+" : "", db );
 						userdata.SetMessage( visualizer_message, 4 );
 					}
+					
+					// Reverb
 					else if( key == SDLK_r )
 					{
 						if( ! userdata.Reverb )
@@ -3338,6 +3449,17 @@ int main( int argc, char **argv )
 							snprintf( visualizer_message, 128, "Reverb: Off" );
 						
 						userdata.SetMessage( visualizer_message, 4 );
+					}
+					
+					// Metronome
+					else if( key == SDLK_m )
+					{
+						if( userdata.Metronome )
+							userdata.Metronome = 0;
+						else if( shift )
+							userdata.Metronome = 2;
+						else
+							userdata.Metronome = 1;
 					}
 				}
 			}
@@ -3577,9 +3699,9 @@ int main( int argc, char **argv )
 				// Fill in the waveform.
 				for( int x = 0; x < drawto->w; x ++ )
 				{
-					for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
+					for( int ch = front_channels - 1; ch >= 0; ch -- )
 					{
-						float amplitude = userdata.VisualizerSample( visualizer_start_sample + (x * userdata.Spec.channels) + ch );
+						float amplitude = userdata.VisualizerSample( visualizer_start_sample + x, ch );
 						int y = std::max<int>( 0, std::min<int>( drawto->h - 1, drawto->h * (0.5f - amplitude * 0.5f) + 0.5f ) );
 						pixels[ y * drawto->w + x ] = (ch % 2) ? colors[ visualizer_color2 ] : colors[ visualizer_color1 ];
 					}
@@ -3590,14 +3712,14 @@ int main( int argc, char **argv )
 			{
 				// Show spectrum of frequencies.
 				int bar_width = drawto->w / (visualizer_fft_frames/2) + 1;
-				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
+				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / front_channels );
 				float base = pow( 2., log2( visualizer_fft_frames/2 ) / (drawto->w + visualizer_fft_width_offset) );
-				for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
+				for( int ch = front_channels - 1; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
 					for( int i = 0; i < frames; i ++ )
-						visualizer_fft_complex[ i ].re = userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + ch );
+						visualizer_fft_complex[ i ].re = userdata.VisualizerSample( visualizer_start_sample + i, ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 					int offset = 0, pixels_wide = 0;
@@ -3643,19 +3765,19 @@ int main( int argc, char **argv )
 				float buckets[ 8192 ] = {0};
 				bool main_bucket[ 8192 ] = {0};
 #endif
-				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
-				for( int ch = (userdata.Spec.channels > 1) ? 1 : 0; ch >= 0; ch -- )
+				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / front_channels );
+				for( int ch = (front_channels > 1) ? 1 : 0; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
 					for( int i = 0; i < frames; i ++ )
-						for( int in_ch = ch; in_ch < userdata.Spec.channels; in_ch += 2 )
-							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + in_ch );
+						for( int in_ch = ch; in_ch < front_channels; in_ch += 2 )
+							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + i, in_ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 				}
 				const FFTComplex *spectrum_l = visualizer_fft_complex_l;
-				const FFTComplex *spectrum_r = (userdata.Spec.channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
+				const FFTComplex *spectrum_r = (front_channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
 				for( int i = 1; i < frames - 1; i ++ )
 				{
 					float amplitude_l = sqrt( spectrum_l[ i ].re * spectrum_l[ i ].re + spectrum_l[ i ].im * spectrum_l[ i ].im );
@@ -3684,20 +3806,20 @@ int main( int argc, char **argv )
 			else if( visualizer == 4 )
 			{
 				// Show left/right spectrum of frequencies.
-				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
+				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / front_channels );
 				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (drawto->h + visualizer_fft_height_offset) );
-				for( int ch = (userdata.Spec.channels > 1) ? 1 : 0; ch >= 0; ch -- )
+				for( int ch = (front_channels > 1) ? 1 : 0; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
 					for( int i = 0; i < frames; i ++ )
-						for( int in_ch = ch; in_ch < userdata.Spec.channels; in_ch += 2 )
-							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + in_ch );
+						for( int in_ch = ch; in_ch < front_channels; in_ch += 2 )
+							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + i, in_ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 				}
 				const FFTComplex *spectrum_l = visualizer_fft_complex_l;
-				const FFTComplex *spectrum_r = (userdata.Spec.channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
+				const FFTComplex *spectrum_r = (front_channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
 				int offset = 0;
 				for( int y = 0; y < drawto->h; y ++ )
 				{
@@ -3721,7 +3843,7 @@ int main( int argc, char **argv )
 					float right_ratio = amplitude_r / amplitude;
 					float separation = fabs( 0.5f - right_ratio ) * 2.f;
 					amplitude /= std::max<float>( 7.f, pow(2.f,harmonics) );
-					for( int ch = userdata.Spec.channels - 1; ch >= 0; ch -- )
+					for( int ch = std::max<int>( 1, front_channels - 1 ); ch >= 0; ch -- )
 					{
 						float this_amplitude = (ch % 2) ? amplitude_r : amplitude_l;
 						Uint32 color = (separation * separation * this_amplitude * 2.f > 0.015625f) ? colors[ visualizer_color1 ] : colors[ visualizer_color2 ];
@@ -3738,20 +3860,20 @@ int main( int argc, char **argv )
 			else if( visualizer == 5 )
 			{
 				// Show left/right separation of frequencies.
-				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / userdata.Spec.channels );
+				int frames = std::min<int>( visualizer_fft_frames, visualizer_frames - visualizer_start_sample / front_channels );
 				float base = pow( 2., log2( visualizer_fft_frames*0.4375 ) / (drawto->h + visualizer_fft_height_offset) );
-				for( int ch = (userdata.Spec.channels > 1) ? 1 : 0; ch >= 0; ch -- )
+				for( int ch = (front_channels > 1) ? 1 : 0; ch >= 0; ch -- )
 				{
 					FFTComplex *visualizer_fft_complex = (ch % 2) ? visualizer_fft_complex_r : visualizer_fft_complex_l;
 					memset( visualizer_fft_complex, 0, visualizer_fft_frames * sizeof(FFTComplex) );
 					for( int i = 0; i < frames; i ++ )
-						for( int in_ch = ch; in_ch < userdata.Spec.channels; in_ch += 2 )
-							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + (i * userdata.Spec.channels) + in_ch );
+						for( int in_ch = ch; in_ch < front_channels; in_ch += 2 )
+							visualizer_fft_complex[ i ].re += userdata.VisualizerSample( visualizer_start_sample + i, in_ch );
 					av_fft_permute( visualizer_fft_context, visualizer_fft_complex );
 					av_fft_calc( visualizer_fft_context, visualizer_fft_complex );
 				}
 				const FFTComplex *spectrum_l = visualizer_fft_complex_l;
-				const FFTComplex *spectrum_r = (userdata.Spec.channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
+				const FFTComplex *spectrum_r = (front_channels == 1) ? visualizer_fft_complex_l : visualizer_fft_complex_r;
 				int offset = 0;
 				for( int y = 0; y < drawto->h; y ++ )
 				{

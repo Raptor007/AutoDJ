@@ -846,7 +846,7 @@ public:
 		std::map<float,float>::const_iterator prev = found;
 		prev --;
 		
-		// Interpolate linearly between nearest freqency volume scales.
+		// Interpolate linearly between nearest frequency volume scales.
 		float b_part = (freq - prev->first) / (found->first - prev->first);
 		return prev->second * (1. - b_part) + found->second * b_part;
 	}
@@ -1128,9 +1128,9 @@ public:
 		
 		float speaker = SpeakerDist();
 		
-		for( int xb = 0; xb <= 5; xb ++ )
+		for( int xb = 0; xb <= 4; xb ++ )
 		{
-			for( int yb = 0; yb <= 4; yb ++ )
+			for( int yb = 0; yb <= 3; yb ++ )
 			{
 				for( int zb = 0; zb <= 4; zb ++ )
 				{
@@ -1204,13 +1204,13 @@ public:
 				for( size_t i = 0; i < bounces_same; i ++ )
 				{
 					int from_frame = REVERB_HISTORY_FRAMES - 1 - frames_back - param->SameSide[ i ].FramesBack;
-					if( from_frame >= 0 )
+					if(likely( from_frame >= 0 ))
 						val += History[ channels * from_frame + ch ] * param->SameSide[ i ].AmpScale;
 				}
 				for( size_t i = 0; i < bounces_oppo; i ++ )
 				{
 					int from_frame = REVERB_HISTORY_FRAMES - 1 - frames_back - param->OppoSide[ i ].FramesBack;
-					if( from_frame >= 0 )
+					if(likely( from_frame >= 0 ))
 						val += History[ channels * from_frame + (ch+1)%channels ] * param->OppoSide[ i ].AmpScale;
 				}
 				buffer[ index ] = val;
@@ -1833,7 +1833,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 	// Keep userdata BPM up-to-date with playback BPM.
 	if( ud->SourceBPM )
 		ud->BPM = bpm;
-		
+	
 	// Apply equalizer if enabled.
 	if( ud->EQ )
 		GlobalEQ.Process( streamF, ud->Spec.channels, ud->Spec.freq, samples / ud->Spec.channels, ud->EQ );
@@ -2970,7 +2970,7 @@ int main( int argc, char **argv )
 					else if( key == SDLK_KP_MULTIPLY )
 					{
 						if( ! userdata.Surround )
-							userdata.Surround = shift ? 0.25f : 0.125f;
+							userdata.Surround = shift ? 0.5f : 0.25f;
 						else if( shift )
 							userdata.Surround = 0.f;
 						else
@@ -3277,19 +3277,59 @@ int main( int argc, char **argv )
 							
 							if( shift || was_flat )
 							{
+								const char *preset = "Flat";
+								bool earbud_eq = false;
+								bool room_eq = false;
+								if( was_flat && userdata.Reverb )
+								{
+									preset = "Room";
+									room_eq = true;
+								}
+								else if( was_flat )
+								{
+									preset = "Earbuds";
+									earbud_eq = true;
+								}
+								
 								userdata.EQ->FreqScale.clear();
 								userdata.EQ->FreqScale[    32. ] = 1.;
-								userdata.EQ->FreqScale[    64. ] = was_flat ? pow( 2.,  1./6. ) : 1.;
-								userdata.EQ->FreqScale[   125. ] = was_flat ? pow( 2.,  1./6. ) : 1.;
+								userdata.EQ->FreqScale[    64. ] = earbud_eq ? pow( 2.,  1./6. ) : 1.;
+								userdata.EQ->FreqScale[   125. ] = earbud_eq ? pow( 2.,  1./6. ) : 1.;
 								userdata.EQ->FreqScale[   250. ] = 1.;
 								userdata.EQ->FreqScale[   500. ] = 1.;
 								userdata.EQ->FreqScale[  1000. ] = 1.;
 								userdata.EQ->FreqScale[  2000. ] = 1.;
-								userdata.EQ->FreqScale[  4000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
-								userdata.EQ->FreqScale[  8000. ] = was_flat ? pow( 2., -2./6. ) : 1.;
-								userdata.EQ->FreqScale[ 16000. ] = was_flat ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  4000. ] = earbud_eq ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  8000. ] = earbud_eq ? pow( 2., -2./6. ) : 1.;
+								userdata.EQ->FreqScale[ 16000. ] = earbud_eq ? pow( 2., -1./6. ) : 1.;
 								
-								snprintf( visualizer_message, 128, "Equalizer: %s", was_flat ? "Earbuds" : "Flat" );
+								if( room_eq )
+								{
+									for( std::vector<ReverbBounce>::const_iterator bounce = userdata.Reverb->SameSide.begin(); bounce != userdata.Reverb->SameSide.end(); bounce ++ )
+									{
+										float freq = userdata.Spec.freq / (float) bounce->FramesBack;
+										for( float res_freq = freq; res_freq < 20000.; res_freq *= 2. )
+										{
+											float bin = userdata.EQ->FreqScale.rbegin()->first; // 16KHz
+											std::map<float,float>::const_iterator found = userdata.EQ->FreqScale.lower_bound( res_freq );
+											if( found != userdata.EQ->FreqScale.end() )
+											{
+												bin = userdata.EQ->FreqScale.begin()->first; // 32Hz
+												if( found != userdata.EQ->FreqScale.begin() )
+												{
+													std::map<float,float>::const_iterator prev = found;
+													prev --;
+													float b_part = (res_freq - prev->first) / (found->first - prev->first);
+													bin = (b_part < 0.5f) ? prev->first : found->first;
+												}
+											}
+											float scale = userdata.EQ->GetScale( bin );
+											userdata.EQ->FreqScale[ bin ] = std::min<float>( scale, 1. / (1. + bounce->AmpScale) );
+										}
+									}
+								}
+								
+								snprintf( visualizer_message, 128, "Equalizer: %s", preset );
 							}
 							else
 								snprintf( visualizer_message, 128, "Equalizer: On" );

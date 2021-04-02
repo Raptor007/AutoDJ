@@ -1064,7 +1064,7 @@ public:
 		Floor = 0.9;
 		HeadWidth = 0.15;
 		BehindScale = 0.5;
-		BounceEnergy = 0.4375;
+		BounceEnergy = 0.375;
 	}
 	~ReverbParam(){}
 	
@@ -2172,7 +2172,7 @@ SDL_Surface *NewDrawTo( SDL_Surface *screen, int zoom )
 
 int main( int argc, char **argv )
 {
-	std::vector<const char*> paths;
+	std::vector<std::string> paths;
 	UserData userdata;
 	bool window = true;
 	bool fullscreen = false;
@@ -2376,18 +2376,12 @@ int main( int argc, char **argv )
 	{
 		// If no music was dropped onto the icon or specified on the command-line, use default paths.
 #ifdef WIN32
-		paths.push_back( "M:\\iTunes\\iTunes Music\\Trance" );
+		const char *home = getenv("USERPROFILE");
 #else
 		const char *home = getenv("HOME");
-		if( home )
-		{
-			int path_size = strlen(home) + strlen("/Music/iTunes/iTunes Music/Trance") + 1;
-			char *path = (char*) alloca( path_size );
-			snprintf( path, path_size, "%s/Music/iTunes/iTunes Music/Trance", home );
-			paths.push_back( path );
-		}
-		paths.push_back( "/Volumes/Media/Music/iTunes/iTunes Music/Trance" );
 #endif
+		if( home )
+			paths.push_back( std::string(home) + std::string(PATH_SEPARATOR) + std::string("Music") );
 	}
 	
 	for( size_t i = 0; i < paths.size(); i ++ )
@@ -2398,8 +2392,10 @@ int main( int argc, char **argv )
 			userdata.QueueSong( (*song_iter).c_str() );
 	}
 	
-	// Seed the random number generator (for shuffle).
+	// Seed the random number generator and perform initial shuffle.
 	srand( time(NULL) );
+	if( userdata.Shuffle )
+		std::random_shuffle( userdata.Queue.begin(), userdata.Queue.end() );
 	
 	// If we want to capture input events, we'll need to initialize SDL video.
 	Uint32 sdl_flags = SDL_INIT_AUDIO;
@@ -3308,8 +3304,9 @@ int main( int argc, char **argv )
 									for( std::vector<ReverbBounce>::const_iterator bounce = userdata.Reverb->SameSide.begin(); bounce != userdata.Reverb->SameSide.end(); bounce ++ )
 									{
 										float freq = userdata.Spec.freq / (float) bounce->FramesBack;
-										for( float res_freq = freq; res_freq < 20000.; res_freq *= 2. )
+										for( float multiple = 1; (freq * multiple) < 20000.; multiple ++ )
 										{
+											float res_freq = freq * multiple;
 											float bin = userdata.EQ->FreqScale.rbegin()->first; // 16KHz
 											std::map<float,float>::const_iterator found = userdata.EQ->FreqScale.lower_bound( res_freq );
 											if( found != userdata.EQ->FreqScale.end() )

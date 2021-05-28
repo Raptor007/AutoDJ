@@ -2397,6 +2397,12 @@ int main( int argc, char **argv )
 	if( userdata.Shuffle )
 		std::random_shuffle( userdata.Queue.begin(), userdata.Queue.end() );
 	
+#ifdef WIN32
+	BOOL (WINAPI *SetProcessDPIAware)( void ) = GetProcAddress( LoadLibraryA("user32.dll"), "SetProcessDPIAware" );
+	if( SetProcessDPIAware )
+		SetProcessDPIAware();
+#endif
+	
 	// If we want to capture input events, we'll need to initialize SDL video.
 	Uint32 sdl_flags = SDL_INIT_AUDIO;
 	if( window )
@@ -2404,6 +2410,12 @@ int main( int argc, char **argv )
 	
 	// Initialize SDL.
 	SDL_Init( sdl_flags );
+	const SDL_VideoInfo *info = SDL_GetVideoInfo();
+	if( info )
+	{
+		fullscreen_w = info->current_w;
+		fullscreen_h = info->current_h;
+	}
 	SDL_Surface *screen = NULL;
 	if( window )
 	{
@@ -2897,8 +2909,6 @@ int main( int argc, char **argv )
 						{
 							if( drawto != screen )
 								SDL_FreeSurface( drawto );
-							fullscreen_w = screen->w;
-							fullscreen_h = screen->h;
 							SDL_FreeSurface( screen );
 							screen = SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 							drawto = screen;

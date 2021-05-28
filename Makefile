@@ -42,7 +42,7 @@ endif
 
 ifneq (,$(findstring MINGW,$(UNAME))$(findstring CYGWIN,$(UNAME)))
 PREFIX = /mingw
-CFLAGS += -DWAVEOUT -Wno-unused-parameter -mwindows -static-libgcc -static-libstdc++ -Wl,--large-address-aware
+CFLAGS += -DWAVEOUT -Wno-unused-parameter -mwindows -static-libgcc -static-libstdc++ -Wl,--large-address-aware -Wl,-Bstatic
 LIBDIR = $(PREFIX)/lib
 LIB = libiconv.a
 LIBRARIES := -lmingw32 -lSDLmain -lSDL -lavdevice -lavformat -lavfilter -lavcodec -lavresample -lswscale -lavutil -lswresample $(LIBRARIES) -lws2_32 -lsecur32 -lwinmm

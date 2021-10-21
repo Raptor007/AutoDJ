@@ -267,26 +267,17 @@ end:
 
 bool AudioFile::DecodePacket( void )
 {
-	decoded = pkt.size;
-	
+	decoded = 0;
 	got_frame = 0;
 	
 	if( pkt.stream_index == audio_stream_idx )
 	{
 		// decode audio frame
 		int ret = avcodec_decode_audio4( audio_dec_ctx, frame, &got_frame, &pkt );
-		if( ret < 0 )
-			return false;
-		
-		// Some audio decoders decode only part of the packet, and have to be
-		// called again with the remainder of the packet data.
-		// Sample: fate-suite/lossless-audio/luckynight-partial.shn
-		// Also, some decoders might over-read the packet.
-		decoded = FFMIN( ret, pkt.size );
 		
 		if( got_frame )
 		{
-			size_t unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample( (AVSampleFormat) frame->format );
+			size_t unpadded_linesize = frame->nb_samples * audio_dec_ctx->channels * av_get_bytes_per_sample( (AVSampleFormat) frame->format );
 			audio_frame_count ++;
 			
 			if( avr )
@@ -302,9 +293,19 @@ bool AudioFile::DecodePacket( void )
 			else
 				AddData( frame->extended_data[ 0 ], unpadded_linesize );
 		}
+		
+		if( ret > 0 )
+		{
+			// Some audio decoders decode only part of the packet, and have to be
+			// called again with the remainder of the packet data.
+			// Sample: fate-suite/lossless-audio/luckynight-partial.shn
+			// Also, some decoders might over-read the packet.
+			decoded = FFMIN( ret, pkt.size );
+			return true;
+		}
 	}
 	
-	return true;
+	return false;
 }
 
 

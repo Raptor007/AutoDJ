@@ -20,6 +20,8 @@
 #include "PlaybackBuffer.h"
 #include "FontDraw.h"
 #include "FontBin.h"
+#include "Equalizer.h"
+#include "Reverb.h"
 #ifdef WAVEOUT
 #include <windows.h>
 #include <mmreg.h>
@@ -28,14 +30,9 @@ extern "C" {
 #include <libavcodec/avfft.h>
 }
 
+
 class Song;
 class SongLoader;
-class EqualizerParam;
-class EqualizerFFT;
-class Equalizer;
-class ReverbBounce;
-class ReverbParam;
-class Reverb;
 class UserData;
 
 #define VISUALIZERS            6
@@ -823,409 +820,6 @@ public:
 // --------------------------------------------------------------------------------------
 
 
-class EqualizerParam
-{
-public:
-	std::map<float,float> FreqScale;
-	
-	EqualizerParam( void ){}
-	~EqualizerParam(){}
-	
-	float LookupScale( float freq ) const
-	{
-		std::map<float,float>::const_iterator found = FreqScale.lower_bound( freq );
-		
-		// If it's higher than our highest specified, use the highest.
-		if( found == FreqScale.end() )
-			return FreqScale.size() ? FreqScale.rbegin()->second : 1.f;
-		
-		// If it's less than or equal to our lowest specified, use the lowest.
-		if( found == FreqScale.begin() )
-			return found->second;
-		
-		std::map<float,float>::const_iterator prev = found;
-		prev --;
-		
-		// Interpolate linearly between nearest frequency volume scales.
-		float b_part = (freq - prev->first) / (found->first - prev->first);
-		return prev->second * (1. - b_part) + found->second * b_part;
-	}
-	
-	float GetScale( float freq ) const
-	{
-		#define TRANSITION_AT (20094.)
-		#define TRANSITION_TO (20627.)
-		
-		// Use EQ specifications for audible frequencies.
-		if( freq <= TRANSITION_AT )
-			return LookupScale(freq);
-		
-		// Above the transition band, use 0Hz scale.
-		if( freq >= TRANSITION_TO )
-			return LookupScale(0.f);
-		
-		// Within the transition band, interpolate from top EQ scale to 0Hz scale.
-		float end_part = (freq - TRANSITION_AT) / (TRANSITION_TO - TRANSITION_AT);
-		return LookupScale(TRANSITION_AT) * (1.f - end_part) + LookupScale(0.f) * end_part;
-	}
-	
-	float GetScale( size_t index, size_t frames, unsigned int rate ) const
-	{
-		return GetScale( ((float) index) * rate / frames );
-	}
-	
-	float MaxScale( void ) const
-	{
-		if( ! FreqScale.size() )
-			return 1.f;
-		
-		std::map<float,float>::const_iterator iter = FreqScale.begin();
-		float max = iter->second;
-		for( iter ++; iter != FreqScale.end(); iter ++ )
-		{
-			if( iter->second > max )
-				max = iter->second;
-		}
-		return max;
-	}
-	
-	float MinScale( void ) const
-	{
-		if( ! FreqScale.size() )
-			return 1.f;
-		
-		std::map<float,float>::const_iterator iter = FreqScale.begin();
-		float min = iter->second;
-		for( iter ++; iter != FreqScale.end(); iter ++ )
-		{
-			if( iter->second < min )
-				min = iter->second;
-		}
-		return min;
-	}
-	
-	float AvgScale( void ) const
-	{
-		if( ! FreqScale.size() )
-			return 1.f;
-		
-		float total = 0.f;
-		for( std::map<float,float>::const_iterator iter = FreqScale.begin(); iter != FreqScale.end(); iter ++ )
-			total += iter->second;
-		return total / FreqScale.size();
-	}
-};
-
-
-class EqualizerFFT
-{
-private:
-	FFTContext *Context1, *Context2;
-	FFTComplex *Complex;
-
-public:
-	unsigned int Channels, Rate;
-	size_t Frames;
-	
-	EqualizerFFT( unsigned int channels, unsigned int rate, size_t frames )
-	{
-		Channels = channels;
-		Rate = rate;
-		Frames = frames;
-		Context1 = av_fft_init( log2(Frames), false );
-		Context2 = av_fft_init( log2(Frames), true );
-		Complex = (FFTComplex*) av_mallocz( Frames * sizeof(FFTComplex) );
-	}
-	
-	~EqualizerFFT()
-	{
-		av_fft_end( Context1 );
-		av_fft_end( Context2 );
-		av_free( Complex );
-	}
-	
-	void Process( float *buffer, EqualizerParam *param )
-	{
-		for( size_t ch = 0; ch < Channels; ch ++ )
-		{
-			memset( Complex, 0, Frames * sizeof(FFTComplex) );
-			for( size_t i = 0; i < Frames; i ++ )
-				Complex[ i ].re = buffer[ (i * Channels) + ch ];
-			av_fft_permute( Context1, Complex );
-			av_fft_calc( Context1, Complex );
-			
-			// Apply equalizer to all frequency bins, and their negative bins.
-			for( size_t i = 1; i < Frames / 2; i ++ )
-			{
-				float scale = param->GetScale( i, Frames, Rate );
-				Complex[ i ].re *= scale;
-				Complex[ i ].im *= scale;
-				Complex[ Frames - i ].re *= scale;
-				Complex[ Frames - i ].im *= scale;
-			}
-			
-			float scale0 = param->GetScale(0.f);
-			Complex[ 0 ].re *= scale0;
-			Complex[ 0 ].im *= scale0;
-			float scaleH = param->GetScale( Frames / 2, Frames, Rate );
-			Complex[ Frames / 2 ].re *= scaleH;
-			Complex[ Frames / 2 ].im *= scaleH;
-			
-			av_fft_permute( Context2, Complex );
-			av_fft_calc( Context2, Complex );
-			
-			#define EQ_ANTIPOP (Rate / 500)  // 2ms each end = 88 samples each end at 44.1KHz
-			float new_scale = 1.f / Frames;
-			
-			for( size_t i = EQ_ANTIPOP; i < Frames - EQ_ANTIPOP; i ++ )
-				buffer[ (i * Channels) + ch ] = Complex[ i ].re * new_scale;
-			
-			size_t end_antipop = std::min<size_t>( Frames / 2, EQ_ANTIPOP );
-			for( size_t i = 0; i < end_antipop; i ++ )
-			{
-				float new_part = i / (float) EQ_ANTIPOP;
-				buffer[ (i * Channels) + ch ] = new_part * Complex[ i ].re * new_scale + (1.f - new_part) * scale0 * buffer[ (i * Channels) + ch ];
-				size_t j = Frames - 1 - i;
-				buffer[ (j * Channels) + ch ] = new_part * Complex[ j ].re * new_scale + (1.f - new_part) * scale0 * buffer[ (j * Channels) + ch ];
-			}
-		}
-	}
-};
-
-
-class Equalizer
-{
-private:
-	std::map<size_t,EqualizerFFT*> EqualizerFFTs;
-
-public:
-	Equalizer( void ){}
-	~Equalizer(){}
-	
-	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, EqualizerParam *param )
-	{
-#ifdef EQ_FRAMES
-		if( frames > EQ_FRAMES )
-		{
-			for( size_t chunk = 0; (chunk + 1) * EQ_FRAMES <= frames; chunk ++ )
-				Process( (float*) (((char*) buffer) + sizeof(*buffer) * channels * chunk * EQ_FRAMES), channels, rate, EQ_FRAMES, param );
-			return;
-		}
-#endif
-		
-		if( param )
-		{
-			// NOTE: We can do this because our audio output never changes rate/channels.
-			if( EqualizerFFTs.find(frames) == EqualizerFFTs.end() )
-				EqualizerFFTs[ frames ] = new EqualizerFFT( channels, rate, frames );
-			
-			EqualizerFFTs[ frames ]->Process( buffer, param );
-		}
-	}
-};
-
-
-Equalizer GlobalEQ;
-
-
-// --------------------------------------------------------------------------------------
-
-
-class ReverbBounce
-{
-public:
-	size_t FramesBack;
-	float AmpScale;
-	
-	ReverbBounce( void ) { FramesBack = 0; AmpScale = 0; }
-	ReverbBounce( size_t f, float a ) { FramesBack = f; AmpScale = a; }
-	~ReverbBounce(){}
-};
-
-
-class ReverbParam
-{
-public:
-	float SpeakerSide, SpeakerFront, SideWall, FrontWall, BackWall, Ceiling, Floor;
-	float HeadWidth, BehindScale;
-	float BounceEnergy;
-	float TotalScale;
-	
-	std::vector<ReverbBounce> SameSide, OppoSide;
-	
-	ReverbParam( void )
-	{
-		SpeakerSide = 1.0;
-		SpeakerFront = 3.2;
-		SideWall = 2.5;
-		FrontWall = 4.2;
-		BackWall = 0.8;
-		Ceiling = 1.4;
-		Floor = 0.9;
-		HeadWidth = 0.15;
-		BehindScale = 0.5;
-		BounceEnergy = 0.375;
-	}
-	~ReverbParam(){}
-	
-	float SpeakerDist( void ) const
-	{
-		return sqrt( SpeakerSide * SpeakerSide + SpeakerFront * SpeakerFront );
-	}
-	
-	float BouncedDist( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
-	{
-		float x = SpeakerSide;
-		if( x_bounces % 2 )
-			x += 2 * (opposite ? SideWall : SideWall - SpeakerSide);
-		x += (x_bounces / 2) * SideWall * 4;
-		x += HeadWidth * (opposite ? 0.5f : -0.5f);
-		
-		float y = SpeakerFront;
-		if( y_bounces % 2 )
-			y += 2 * BackWall;
-		y += (y_bounces / 2) * (FrontWall + BackWall) * 2;
-		
-		float z = 0.f;
-		if( z_bounces % 2 )
-			z += 2 * (up ? Ceiling : Floor);
-		z += (z_bounces / 2) * (Ceiling + Floor) * 2;
-		
-		return sqrt( x * x + y * y + z * z );
-	}
-	
-	float AmpScale( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite ) const
-	{
-		if( !(x_bounces || y_bounces || z_bounces) )
-			return 0.f;
-		if( opposite && ! x_bounces )
-			return 0.f;
-		float bounced = BouncedDist( x_bounces, y_bounces, z_bounces, up, opposite );
-		float speaker = SpeakerDist();
-		float scale = pow( 0.5, bounced / speaker ) * pow( BounceEnergy, x_bounces + y_bounces + z_bounces );
-		if( y_bounces % 2 ) // Arriving from behind.
-			scale *= pow( BehindScale, y_bounces / (float)(x_bounces + y_bounces) );
-		return scale;
-	}
-	
-	void AddBounce( int x_bounces, int y_bounces, int z_bounces, bool up, bool opposite, float speaker, int rate )
-	{
-		float amp_scale = AmpScale( x_bounces, y_bounces, z_bounces, up, opposite );
-		if( amp_scale )
-		{
-			size_t frames_back = (BouncedDist( x_bounces, y_bounces, z_bounces, up, opposite ) - speaker) * rate / 344.;
-			if( opposite )
-				OppoSide.push_back( ReverbBounce( frames_back, amp_scale ) );
-			else
-				SameSide.push_back( ReverbBounce( frames_back, amp_scale ) );
-		}
-	}
-	
-	void Setup( unsigned int rate )
-	{
-		SameSide.clear();
-		OppoSide.clear();
-		
-		float speaker = SpeakerDist();
-		
-		for( int xb = 0; xb <= 4; xb ++ )
-		{
-			for( int yb = 0; yb <= 3; yb ++ )
-			{
-				for( int zb = 0; zb <= 4; zb ++ )
-				{
-					AddBounce( xb, yb, zb, false, false, speaker, rate );
-					AddBounce( xb, yb, zb, true,  false, speaker, rate );
-					AddBounce( xb, yb, zb, false, true,  speaker, rate );
-					AddBounce( xb, yb, zb, true,  true,  speaker, rate );
-				}
-			}
-		}
-		
-		TotalScale = 1.;
-		size_t bounces_same = SameSide.size();
-		size_t bounces_oppo = OppoSide.size();
-		for( size_t i = 0; i < bounces_same; i ++ )
-			TotalScale += SameSide[ i ].AmpScale;
-		for( size_t i = 0; i < bounces_oppo; i ++ )
-			TotalScale += OppoSide[ i ].AmpScale;
-	}
-};
-
-
-class Reverb
-{
-private:
-	float *History;
-	unsigned int Rate;
-
-public:
-	Reverb( void ) { History = NULL; Rate = 44100; }
-	~Reverb(){}
-	
-	#define REVERB_HISTORY_FRAMES 262144
-	
-	void Process( float *buffer, unsigned int channels, unsigned int rate, size_t frames, ReverbParam *param )
-	{
-		bool changed_rate = (Rate != rate);
-		Rate = rate;
-		
-		size_t buff_bytes = sizeof(*History) * channels * frames;
-		size_t hist_bytes = sizeof(*History) * channels * REVERB_HISTORY_FRAMES;
-		uint8_t *raw_history = (uint8_t*) History;
-		
-		if( ! History )
-		{
-			History = (float*) malloc( hist_bytes );
-			memset( History, 0, hist_bytes );
-			raw_history = (uint8_t*) History;
-		}
-		else
-			memmove( raw_history, raw_history + buff_bytes, hist_bytes - buff_bytes );
-		memcpy( raw_history + hist_bytes - buff_bytes, buffer, buff_bytes );
-		
-		if( ! param )
-			return;
-		
-		// If the reverb hasn't been calculated yet or the rate has changed, calculate now.
-		if( changed_rate || (param->SameSide.size() + param->OppoSide.size() == 0) )
-			param->Setup( rate );
-		
-		size_t bounces_same = param->SameSide.size();
-		size_t bounces_oppo = param->OppoSide.size();
-		
-		for( unsigned int ch = 0; ch < channels; ch ++ )
-		{
-			for( size_t frame = 0; frame < frames; frame ++ )
-			{
-				size_t index = channels * frame + ch;
-				float val = buffer[ index ];
-				size_t frames_back = frames - 1 - frame;
-				for( size_t i = 0; i < bounces_same; i ++ )
-				{
-					int from_frame = REVERB_HISTORY_FRAMES - 1 - frames_back - param->SameSide[ i ].FramesBack;
-					if(likely( from_frame >= 0 ))
-						val += History[ channels * from_frame + ch ] * param->SameSide[ i ].AmpScale;
-				}
-				for( size_t i = 0; i < bounces_oppo; i ++ )
-				{
-					int from_frame = REVERB_HISTORY_FRAMES - 1 - frames_back - param->OppoSide[ i ].FramesBack;
-					if(likely( from_frame >= 0 ))
-						val += History[ channels * from_frame + (ch+1)%channels ] * param->OppoSide[ i ].AmpScale;
-				}
-				buffer[ index ] = val;
-			}
-		}
-	}
-};
-
-
-Reverb GlobalReverb;
-
-
-// --------------------------------------------------------------------------------------
-
-
 class UserData
 {
 public:
@@ -1644,6 +1238,10 @@ bool CalculateCrossfade( const Song *current_song, const Song *next_song, double
 
 
 // --------------------------------------------------------------------------------------
+
+
+Equalizer GlobalEQ;
+Reverb GlobalReverb;
 
 
 void AudioCallback( void *userdata, Uint8* stream, int len )
@@ -2563,6 +2161,9 @@ int main( int argc, char **argv )
 	{
 		// Start with a flat 10-band EQ if user didn't specify.
 		disabled_eq = new EqualizerParam();
+		#define MIN_EQ 0.
+		#define MAX_EQ 0.
+		disabled_eq->FreqScale[ MIN_EQ ] = 1.;
 		disabled_eq->FreqScale[    32. ] = 1.;
 		disabled_eq->FreqScale[    64. ] = 1.;
 		disabled_eq->FreqScale[   125. ] = 1.;
@@ -2573,6 +2174,7 @@ int main( int argc, char **argv )
 		disabled_eq->FreqScale[  4000. ] = 1.;
 		disabled_eq->FreqScale[  8000. ] = 1.;
 		disabled_eq->FreqScale[ 16000. ] = 1.;
+		disabled_eq->FreqScale[ MAX_EQ ] = 1.;
 	}
 	
 	// Keep track of disabled reverb parameters for toggling.
@@ -3298,6 +2900,7 @@ int main( int argc, char **argv )
 								}
 								
 								userdata.EQ->FreqScale.clear();
+								userdata.EQ->FreqScale[ MIN_EQ ] = 1.;
 								userdata.EQ->FreqScale[    32. ] = 1.;
 								userdata.EQ->FreqScale[    64. ] = earbud_eq ? pow( 2.,  1./6. ) : 1.;
 								userdata.EQ->FreqScale[   125. ] = earbud_eq ? pow( 2.,  1./6. ) : 1.;
@@ -3308,6 +2911,7 @@ int main( int argc, char **argv )
 								userdata.EQ->FreqScale[  4000. ] = earbud_eq ? pow( 2., -1./6. ) : 1.;
 								userdata.EQ->FreqScale[  8000. ] = earbud_eq ? pow( 2., -2./6. ) : 1.;
 								userdata.EQ->FreqScale[ 16000. ] = earbud_eq ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[ MAX_EQ ] = 1.;
 								
 								if( room_eq )
 								{
@@ -3484,14 +3088,14 @@ int main( int argc, char **argv )
 						}
 						else
 						{
-							userdata.Reverb->BounceEnergy += 0.0625;
+							userdata.Reverb->BounceEnergy += 0.05;
 							if( userdata.Reverb->BounceEnergy > 1. )
-								userdata.Reverb->BounceEnergy = 0.125;
+								userdata.Reverb->BounceEnergy = 0.1;
 							userdata.Reverb->Setup( userdata.Spec.freq );
 						}
 						
 						if( userdata.Reverb )
-							snprintf( visualizer_message, 128, "Reverb Bounce: %0.1f%%", userdata.Reverb->BounceEnergy * 100. );
+							snprintf( visualizer_message, 128, "Reverb Bounce: %.0f%%", userdata.Reverb->BounceEnergy * 100. );
 						else
 							snprintf( visualizer_message, 128, "Reverb: Off" );
 						

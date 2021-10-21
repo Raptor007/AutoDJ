@@ -1,7 +1,3 @@
-/*
- *  Mutex.h
- */
-
 #pragma once
 class Mutex;
 

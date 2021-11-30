@@ -6,7 +6,7 @@ class PlaybackBuffer
 {
 public:
 	void (*Callback)( void *userdata, Uint8 *stream, int len );
-	int BufferSize, Buffered, StartAt, LastSent;
+	int BufferSize, Buffered, StartAt;
 	Uint8 *Buffer;
 	Mutex Lock;
 	
@@ -17,6 +17,7 @@ public:
 	
 	void FillStream( void *userdata, Uint8 *stream, int len, bool lock = true );
 	void AddToBuffer( void *userdata, int len );
+	void Clear( void );
 	
 	int Unfilled( void ) const;
 };

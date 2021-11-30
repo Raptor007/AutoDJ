@@ -1774,7 +1774,7 @@ int main( int argc, char **argv )
 	UserData userdata;
 	bool window = true;
 	bool fullscreen = false;
-	size_t fullscreen_w = 0, fullscreen_h = 0;
+	size_t fullscreen_w = 0, fullscreen_h = 0, window_w = 256, window_h = 64;
 	bool resize = false;
 #ifdef WIN32
 	resize = true;
@@ -1815,10 +1815,21 @@ int main( int argc, char **argv )
 				resize = true;
 			else if( strcasecmp( argv[ i ], "--no-resize" ) == 0 )
 				resize = false;
+			else if( (strncasecmp( argv[ i ], "--res=", strlen("--res=") ) == 0) && strchr( argv[ i ], 'x' ) )
+			{
+				window_w = atoi( strchr( argv[ i ], '=' ) + 1 );
+				window_h = atoi( strchr( argv[ i ], 'x' ) + 1 );
+			}
 			else if( strncasecmp( argv[ i ], "--zoom=", strlen("--zoom=") ) == 0 )
 				zoom = std::max<int>( 1, atoi( argv[ i ] + strlen("--zoom=") ) );
 			else if( strncasecmp( argv[ i ], "--visualizer=", strlen("--visualizer=") ) == 0 )
 				visualizer = atoi( argv[ i ] + strlen("--visualizer=") );
+			else if( strncasecmp( argv[ i ], "--color0=", strlen("--color0=") ) == 0 )
+				visualizer_text_color = atoi( strchr( argv[ i ], '=' ) + 1 );
+			else if( strncasecmp( argv[ i ], "--color1=", strlen("--color1=") ) == 0 )
+				visualizer_color1 = atoi( strchr( argv[ i ], '=' ) + 1 );
+			else if( strncasecmp( argv[ i ], "--color2=", strlen("--color2=") ) == 0 )
+				visualizer_color2 = atoi( strchr( argv[ i ], '=' ) + 1 );
 			else if( strcasecmp( argv[ i ], "--no-shuffle" ) == 0 )
 				userdata.Shuffle = false;
 			else if( strcasecmp( argv[ i ], "--no-repeat" ) == 0 )
@@ -2018,7 +2029,7 @@ int main( int argc, char **argv )
 	if( window )
 	{
 		SDL_WM_SetCaption( "Raptor007's AutoDJ", "AutoDJ" );
-		screen = fullscreen ? SDL_SetVideoMode( fullscreen_w, fullscreen_h, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( 256*zoom, 64*zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+		screen = fullscreen ? SDL_SetVideoMode( fullscreen_w, fullscreen_h, 0, SDL_SWSURFACE | SDL_FULLSCREEN ) : SDL_SetVideoMode( window_w * zoom, window_h * zoom, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 		SDL_ShowCursor( (fullscreen && visualizer) ? SDL_DISABLE : SDL_ENABLE );
 	}
 	
@@ -2512,7 +2523,7 @@ int main( int argc, char **argv )
 							if( drawto != screen )
 								SDL_FreeSurface( drawto );
 							SDL_FreeSurface( screen );
-							screen = SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+							screen = SDL_SetVideoMode( window_w, window_h, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 							drawto = screen;
 							fullscreen = false;
 						}
@@ -2534,7 +2545,7 @@ int main( int argc, char **argv )
 								fullscreen_h = screen->h;
 							}
 							else
-								screen = SDL_SetVideoMode( 256, 64, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
+								screen = SDL_SetVideoMode( window_w, window_h, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
 							drawto = screen;
 							fullscreen = true;
 						}
@@ -2628,6 +2639,9 @@ int main( int argc, char **argv )
 							
 							if( songs_size >= 2 )
 								userdata.Songs.at( 1 )->CurrentFrame = 0;
+							
+							if( ! userdata.Playing )
+								userdata.Buffer.Clear();
 						}
 					}
 					else if( key == SDLK_RIGHTBRACKET || key == SDLK_RIGHT )
@@ -2637,7 +2651,12 @@ int main( int argc, char **argv )
 							Song *current_song = userdata.Songs.front();
 							int beat = current_song->Beat();
 							if( ! userdata.CrossfadeOut )
+							{
 								userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
+								
+								if( ! userdata.Playing )
+									userdata.Buffer.Clear();
+							}
 							else if( userdata.Crossfading )
 							{
 								current_song->FirstOutroFrame = 1.;
@@ -2687,8 +2706,6 @@ int main( int argc, char **argv )
 							userdata.SetMessage( visualizer_message, 2, false );
 						}
 					}
-					
-					// Speed
 					else if( key == SDLK_BACKSLASH )
 					{
 						if( userdata.Songs.size() )
@@ -2696,8 +2713,13 @@ int main( int argc, char **argv )
 							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
 							if( userdata.Songs.size() < 2 )
 								userdata.SetMessage( "Loading...", 4, false );
+							
+							if( ! userdata.Playing )
+								userdata.Buffer.Clear();
 						}
 					}
+					
+					// Speed
 					else if( key == SDLK_k )
 					{
 						userdata.BPM -= 1.;

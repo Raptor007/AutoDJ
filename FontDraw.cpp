@@ -8,7 +8,19 @@ FontDraw::FontDraw( const uint8_t *font_bin )
 	Width = 0;
 	Height = 0;
 	
-	CharW = (font_bin[18] + 256L*font_bin[19] + 256L*256L*font_bin[20] + 256L*256L*256L*font_bin[21]) / 256;
+	if( ! font_bin )
+	{
+		CharW = 1;
+		CharH = 1;
+		for( size_t i = 0; i < 256; i ++ )
+		{
+			Char[ i ] = (bool*) malloc( 1 );
+			Char[ i ][ 0 ] = true;
+		}
+		return;
+	}
+	
+	CharW = (font_bin[18] + 256L*font_bin[19] + 256L*256L*font_bin[20] + 256L*256L*256L*font_bin[21]) / 256L;
 	CharH =  font_bin[22] + 256L*font_bin[23] + 256L*256L*font_bin[24] + 256L*256L*256L*font_bin[25];
 	const uint8_t *bmp_data = font_bin + (font_bin[10] + 256L*font_bin[11] + 256L*256L*font_bin[12] + 256L*256L*256L*font_bin[13]);
 	

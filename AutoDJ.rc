@@ -29,13 +29,13 @@ BEGIN
         BEGIN
             VALUE "Comments", "raptor007.com/auto-dj"
             VALUE "CompanyName", "Raptor007 (Blair Sherman)"
-            VALUE "FileDescription", "AutoDJ 0.0.1 devbuild"
-            VALUE "FileVersion", "0, 0, 1, 0"
+            VALUE "FileDescription", "AutoDJ"
+            VALUE "FileVersion", "0.0.1"
             VALUE "InternalName", "AutoDJ"
-            VALUE "LegalCopyright", "2015-2016 Raptor007 (Blair Sherman)"
+            VALUE "LegalCopyright", "2015-2022 Raptor007 (Blair Sherman)"
             VALUE "OriginalFilename", "AutoDJ.exe"
             VALUE "ProductName", "AutoDJ"
-            VALUE "ProductVersion", "0, 0, 1, 0"
+            VALUE "ProductVersion", "0.0.1"
         END
     END
 	BLOCK "VarFileInfo"

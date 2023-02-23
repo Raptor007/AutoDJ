@@ -1,6 +1,7 @@
 #pragma once
 #define __STDC_CONSTANT_MACROS
 #define __STDC_FORMAT_MACROS
+#include <stdint.h>
 extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/samplefmt.h>
@@ -17,7 +18,7 @@ class AudioFile
 public:
 	uint8_t *Data;
 	size_t Allocated, Size;
-	size_t Channels, SampleRate, BytesPerSample;
+	size_t Channels, SampleRate, BytesPerSample, SamplesPerChannel;
 	AVSampleFormat SampleFormat;
 	std::map<std::string,std::string> Tags;
 	
@@ -26,8 +27,9 @@ public:
 	
 	void Clear( void );
 	bool SetAllocation( size_t new_alloc );
-	bool AddData( uint8_t *add_data, size_t add_size );
+	bool AddData( const uint8_t *add_data, size_t add_size );
 	bool Load( const char *filename, volatile bool *running_ptr );
+	bool Save( const char *filename ) const;
 
 private:
 	AVFormatContext *fmt_ctx;

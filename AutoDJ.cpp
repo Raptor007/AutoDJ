@@ -26,6 +26,9 @@
 #include <windows.h>
 #include <mmreg.h>
 #endif
+#ifdef WIN32
+#include <ios>
+#endif
 extern "C" {
 #include <libavcodec/avfft.h>
 }
@@ -158,6 +161,10 @@ public:
 			if( last_dot != std::string::npos )
 				Audio.Tags["title"] = title.substr( 0, last_dot );
 		}
+		
+		double tag_bpm = TagBPM();
+		if( tag_bpm )
+			BPM = tag_bpm;
 	}
 	
 	~Song()
@@ -172,10 +179,21 @@ public:
 		return NULL;
 	}
 	
+	double TagBPM( void ) const
+	{
+		const char *bpm = GetTag("TBP");
+		if( ! bpm )
+			bpm = GetTag("bpm");
+		if( bpm )
+			return atof( bpm );
+		return 0.;
+	}
+	
 	void SetSurroundVolume( float surround )
 	{
+		size_t front = std::max<size_t>( 2, Audio.Channels );
 		for( size_t i = 0; i < 6; i ++ )
-			ChannelVolume[ i ] = (i < Audio.Channels) ? 1.f : surround;
+			ChannelVolume[ i ] = (i < front) ? 1.f : surround;
 	}
 	
 	double CurrentSeconds( void ) const
@@ -596,8 +614,16 @@ public:
 		size_t best_first_beat = first_beat;
 		double best_error = FLT_MAX;
 		int best_doff = INT_MAX;
+		int min_bpm = 120, max_bpm = 150;
+		double tag_bpm = TagBPM();
 		
-		for( int bpm = 120; (bpm <= 150) && (best_error > 0.); bpm ++ )
+		if( tag_bpm )
+		{
+			min_bpm = floor(tag_bpm);
+			max_bpm = ceil(tag_bpm);
+		}
+		
+		for( int bpm = min_bpm; (bpm <= max_bpm) && (best_error > 0.); bpm ++ )
 		{
 			// Search at a BPM and see how closely it matches.
 			
@@ -746,13 +772,19 @@ public:
 				return;
 		}
 		
-		// If it's close, round to the nearest whole BPM.
-		double bpm_rounding = 0.106;
-		double bpm_fpart = modf( Audio.SampleRate * 60. / (double) best_frame_skip, &BPM );
-		if( bpm_fpart >= (1. - bpm_rounding) )
-			BPM += 1.;
-		else if( bpm_fpart > bpm_rounding )
-			BPM += bpm_fpart;
+		if( tag_bpm )
+			BPM = tag_bpm;
+		else
+		{
+			// Determine BPM from best_frame_skip and Audio.SampleRate.
+			// If it's close, round to the nearest whole BPM.
+			double bpm_fpart = modf( Audio.SampleRate * 60. / (double) best_frame_skip, &BPM );
+			double bpm_rounding = 0.106;
+			if( bpm_fpart >= (1. - bpm_rounding) )
+				BPM += 1.;
+			else if( bpm_fpart > bpm_rounding )
+				BPM += bpm_fpart;
+		}
 		
 		// Sanity-check the BPM, and scale it to the expected range.
 		if( BPM < 90. )
@@ -919,9 +951,11 @@ public:
 		Queue.push_back( filename );
 	}
 	
-	void PlaySong( const std::string &filename )
+	void PlaySong( const std::string &filename, bool enqueue = false )
 	{
 		bool already_loaded = false;
+		const Song *current_song = Songs.size() ? *(Songs.begin()) : NULL;
+		const Song *next_song = (Songs.size() >= 2) ? *(Songs.begin() + 1) : NULL;
 		
 		for( std::deque<Song*>::iterator song = Songs.begin(); song != Songs.end(); song ++ )
 		{
@@ -931,9 +965,23 @@ public:
 				continue;
 			}
 			
-			(*song)->CurrentFrame = (*song)->TotalFrames;
-			(*song)->IntroBeats = 0;
-			(*song)->OutroBeats = 0;
+			if( enqueue )
+			{
+				if( (*song != current_song) && ((*song != next_song) || ! Crossfading) )
+				{
+					delete *song;
+					Songs.erase( song );
+					song = Songs.begin();
+				}
+			}
+			else if( ! already_loaded )
+				MostRecentToRemove = *song;
+			else
+			{
+				(*song)->CurrentFrame = (*song)->TotalFrames;
+				(*song)->IntroBeats = 0;
+				(*song)->OutroBeats = 0;
+			}
 		}
 		
 		if( ! already_loaded )
@@ -943,8 +991,12 @@ public:
 				Queue.erase( found );
 			Queue.push_front( filename );
 			
-			SetMessage( "Loading...", 4, false );
+			if( ! enqueue )
+				SetMessage( "Loading...", 4, false );
 		}
+		
+		if( enqueue )
+			SetMessage( "Queued", 4, false );
 		
 		// Throw away whatever we were loading unless it happens to be this song.
 		Loader.KeepThis = (Loader.Filename == filename);
@@ -1364,7 +1416,7 @@ void AudioCallback( void *userdata, Uint8* stream, int len )
 			// Crossfading now.
 			
 			if( ud->SourceBPM )
-				bpm = LinearCrossfade( current_song->BPM * ud->SourcePitchScale, next_song->BPM * ud->SourcePitchScale, crossfade );
+				bpm = ((crossfade > 0.5) ? next_song->BPM : current_song->BPM) * ud->SourcePitchScale;
 			
 			bool a_nearest = ( ((size_t) ud->Spec.freq == current_song->Audio.SampleRate) && (fabs(current_song->BPM - bpm) < 0.001) );
 			bool b_nearest = ( ((size_t) ud->Spec.freq == next_song->Audio.SampleRate   ) && (fabs(next_song->BPM    - bpm) < 0.001) );
@@ -1520,20 +1572,8 @@ std::deque<std::string> DirSongs( std::string path )
 			
 			while( (entry = readdir(dir)) )
 			{
-				if( entry->d_name[ 0 ] == '.' )
+				if( entry->d_name[ 0 ] != '.' )  // Ignore current directory (.) parent directory (..) and hidden files (.*).
 				{
-					// Ignore current directory (.) parent directory (..) and hidden files (.*).
-				}
-				else if( ! (entry->d_type & DT_DIR) )
-				{
-					// Not a directory.
-					
-					songs.push_back( std::string(path) + std::string(PATH_SEPARATOR) + std::string(entry->d_name) );
-				}
-				else
-				{
-					// Subdirectory.
-					
 					std::deque<std::string> subdir_songs = DirSongs( path + std::string(PATH_SEPARATOR) + std::string(entry->d_name) );
 					for( std::deque<std::string>::const_iterator song_iter = subdir_songs.begin(); song_iter != subdir_songs.end(); song_iter ++ )
 						songs.push_back( *song_iter );
@@ -1608,6 +1648,33 @@ std::deque<std::string> DirSongs( std::string path )
 				fclose( file );
 			}
 		}
+#ifdef WIN32
+		else if( (path_len > 4) && (strncasecmp( path_str + strlen(path_str) - 4, ".lnk", 4 ) == 0) )
+		{
+			// Windows shortcut.
+			
+			FILE *file = fopen( path_str, "rb" );
+			if( file )
+			{
+				char buffer[ 1024 ] = "";
+				size_t size = fread( buffer, 1, sizeof(buffer), file );
+				if( size > 0x4C )
+				{
+					for( size_t i = 0x4C; i < size - 3; i ++ )
+					{
+						if( (buffer[ i + 1 ] == ':') && (buffer[ i + 2 ] == PATH_SEPARATOR[0]) && (buffer[ i - 1 ] == '\0') )
+						{
+							std::deque<std::string> subdir_songs = DirSongs( buffer + i );
+							for( std::deque<std::string>::const_iterator song_iter = subdir_songs.begin(); song_iter != subdir_songs.end(); song_iter ++ )
+								songs.push_back( *song_iter );
+						}
+					}
+				}
+				
+				fclose( file );
+			}
+		}
+#endif
 		else
 			// Individual song.
 			songs.push_back( path );
@@ -1960,6 +2027,18 @@ int main( int argc, char **argv )
 				write = argv[ i ] + strlen("--write=");
 			else if( strcasecmp( argv[ i ], "--verbose" ) == 0 )
 				userdata.Verbose = true;
+#ifdef WIN32
+			else if( strcasecmp( argv[ i ], "--console" ) == 0 )
+			{
+				if( AllocConsole() )
+				{
+					freopen( "CONIN$", "rt", stdin );
+					freopen( "CONOUT$", "wt", stderr );
+					freopen( "CONOUT$", "wt", stdout );
+					std::ios::sync_with_stdio();
+				}
+			}
+#endif
 			else if( strcasecmp( argv[ i ], "--quiet" ) == 0 )
 				userdata.Verbose = false;
 			else
@@ -1990,7 +2069,11 @@ int main( int argc, char **argv )
 		const char *home = getenv("HOME");
 #endif
 		if( home )
+		{
 			paths.push_back( std::string(home) + std::string(PATH_SEPARATOR) + std::string("Music") );
+			if( userdata.Verbose )
+				printf( "Looking for music in home dir: %s\n", paths.back().c_str() );
+		}
 	}
 	
 	for( size_t i = 0; i < paths.size(); i ++ )
@@ -2000,6 +2083,9 @@ int main( int argc, char **argv )
 		for( std::deque<std::string>::const_iterator song_iter = songs.begin(); song_iter != songs.end(); song_iter ++ )
 			userdata.QueueSong( (*song_iter).c_str() );
 	}
+	
+	if( userdata.Verbose )
+		printf( "Queued %i files.\n", (int) userdata.Queue.size() );
 	
 	// Seed the random number generator and perform initial shuffle.
 	srand( time(NULL) );
@@ -2349,7 +2435,9 @@ int main( int argc, char **argv )
 						{
 							if( SearchResults.size() )
 							{
-								userdata.PlaySong( *(SearchResults.begin()) );
+								// Shift-return puts the song next in queue instead of playing immediately.
+								bool enqueue = shift || (userdata.CrossfadeIn && userdata.CrossfadeOut && userdata.Playing);
+								userdata.PlaySong( *(SearchResults.begin()), enqueue );
 								
 								// Unpause when picking a new song from search.
 								if( ! userdata.Playing )
@@ -2377,8 +2465,15 @@ int main( int argc, char **argv )
 							if( SearchTerms.back().length() )
 								SearchTerms.push_back("");
 						}
-						else if( key == SDLK_UP )
+						else if( key == SDLK_HOME )
 							UpdateSearch( &userdata );
+						else if( key == SDLK_END )
+						{
+							while( SearchResults.size() > 1 )
+								SearchResults.erase( SearchResults.begin() );
+						}
+						else if( key == SDLK_UP )
+							UpdateSearch( &userdata ); // FIXME: Should just scroll up one line.
 						else if( key == SDLK_DOWN )
 						{
 							if( SearchResults.size() > 1 )
@@ -2628,7 +2723,7 @@ int main( int argc, char **argv )
 					}
 					
 					// Track
-					else if( key == SDLK_LEFTBRACKET || key == SDLK_LEFT )
+					else if( (key == SDLK_LEFT) || (key == SDLK_HOME) )
 					{
 						size_t songs_size = userdata.Songs.size();
 						if( songs_size )
@@ -2644,7 +2739,7 @@ int main( int argc, char **argv )
 								userdata.Buffer.Clear();
 						}
 					}
-					else if( key == SDLK_RIGHTBRACKET || key == SDLK_RIGHT )
+					else if( (key == SDLK_RIGHT) || (key == SDLK_BACKSLASH) || (key == SDLK_END) )
 					{
 						if( userdata.Songs.size() )
 						{
@@ -2678,63 +2773,134 @@ int main( int argc, char **argv )
 					}
 					else if( key == SDLK_COMMA )
 					{
-						if( userdata.Songs.size() )
+						if( userdata.Crossfading && (userdata.Songs.size() >= 2) )
+						{
+							Song *next_song = *(userdata.Songs.begin() + 1);
+							next_song->CurrentFrame = next_song->FrameAtBeat( next_song->Beat() - (shift ? 0.25 : 0.015625) );
+						}
+						else if( userdata.Songs.size() )
 						{
 							Song *current_song = userdata.Songs.front();
-							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() - (shift ? 128. : 32.) );
-							if( current_song->CurrentFrame < 0. )
-								current_song->CurrentFrame = 0.;
-							
-							double sec = current_song->CurrentSeconds();
-							int min = sec / 60.;
-							sec -= (min * 60.);
-							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
-							userdata.SetMessage( visualizer_message, 2, false );
+							current_song->FirstBeatFrame += (shift ? 0.25 : 0.015625) * (60. * current_song->Audio.SampleRate) / current_song->BPM;
 						}
 					}
 					else if( key == SDLK_PERIOD )
 					{
-						if( userdata.Songs.size() )
+						if( userdata.Crossfading && (userdata.Songs.size() >= 2) )
+						{
+							Song *next_song = *(userdata.Songs.begin() + 1);
+							next_song->CurrentFrame = next_song->FrameAtBeat( next_song->Beat() + (shift ? 0.25 : 0.015625) );
+						}
+						else if( userdata.Songs.size() )
 						{
 							Song *current_song = userdata.Songs.front();
-							current_song->CurrentFrame = current_song->FrameAtBeat( current_song->Beat() + (shift ? 128. : 32.) );
+							current_song->FirstBeatFrame -= (shift ? 0.25 : 0.015625) * (60. * current_song->Audio.SampleRate) / current_song->BPM;
+						}
+					}
+					else if( key == SDLK_LEFTBRACKET )
+					{
+						Song *song = NULL;
+						if( userdata.Crossfading && (userdata.Songs.size() >= 2) )
+							song = *(userdata.Songs.begin() + 1);
+						else if( userdata.Songs.size() )
+							song = userdata.Songs.front();
+						
+						if( song )
+						{
+							song->CurrentFrame = song->FrameAtBeat( song->Beat() - (shift ? 128. : 32.) );
+							if( (song->CurrentFrame < 0.) && ! userdata.Crossfading )
+								song->CurrentFrame = 0.;
 							
-							double sec = current_song->CurrentSeconds();
+							double sec = song->CurrentSeconds();
 							int min = sec / 60.;
 							sec -= (min * 60.);
 							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
 							userdata.SetMessage( visualizer_message, 2, false );
 						}
 					}
-					else if( key == SDLK_BACKSLASH )
+					else if( key == SDLK_RIGHTBRACKET )
 					{
-						if( userdata.Songs.size() )
+						Song *song = NULL;
+						if( userdata.Crossfading && (userdata.Songs.size() >= 2) )
+							song = *(userdata.Songs.begin() + 1);
+						else if( userdata.Songs.size() )
+							song = userdata.Songs.front();
+						
+						if( song )
 						{
-							userdata.Songs.front()->CurrentFrame = userdata.Songs.front()->TotalFrames;
-							if( userdata.Songs.size() < 2 )
-								userdata.SetMessage( "Loading...", 4, false );
+							song->CurrentFrame = song->FrameAtBeat( song->Beat() + (shift ? 128. : 32.) );
 							
-							if( ! userdata.Playing )
-								userdata.Buffer.Clear();
+							double sec = song->CurrentSeconds();
+							int min = sec / 60.;
+							sec -= (min * 60.);
+							snprintf( visualizer_message, 128, "%i:%02.0f", min, sec );
+							userdata.SetMessage( visualizer_message, 2, false );
 						}
 					}
 					
 					// Speed
-					else if( key == SDLK_k )
+					else if( key == SDLK_SEMICOLON )
 					{
-						userdata.BPM -= 1.;
+						if( userdata.SourceBPM && userdata.Songs.size() )
+							userdata.BPM = (int) userdata.Songs.front()->BPM;
+						else
+							userdata.BPM -= 1.;
 						userdata.SourceBPM = false;
 						snprintf( visualizer_message, 128, "Playback BPM: %.0f", userdata.BPM );
 						userdata.SetMessage( visualizer_message, 4 );
 					}
-					else if( key == SDLK_l )
+					else if( key == SDLK_QUOTE )
 					{
+						if( userdata.SourceBPM && userdata.Songs.size() )
+							userdata.BPM = (int) userdata.Songs.front()->BPM;
 						userdata.BPM += 1.;
 						userdata.SourceBPM = false;
 						snprintf( visualizer_message, 128, "Playback BPM: %.0f", userdata.BPM );
 						userdata.SetMessage( visualizer_message, 4 );
 					}
-					else if( key == SDLK_SEMICOLON || key == SDLK_DOWN )
+					else if( key == SDLK_DOWN )
+					{
+						if( userdata.SourceBPM )
+						{
+							userdata.SourcePitchScale /= pow( 2., 1./12. );
+							double st = log2(userdata.SourcePitchScale) / log2(pow( 2., 1./12. ));
+							if( userdata.Songs.size() )
+							{
+								userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
+								snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
+							}
+							else
+								snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
+						}
+						else
+						{
+							userdata.BPM -= 1.;
+							snprintf( visualizer_message, 128, "Playback BPM: %.0f", userdata.BPM );
+						}
+						userdata.SetMessage( visualizer_message, 4 );
+					}
+					else if( key == SDLK_UP )
+					{
+						if( userdata.SourceBPM )
+						{
+							userdata.SourcePitchScale *= pow( 2., 1./12. );
+							double st = log2(userdata.SourcePitchScale) / log2(pow( 2., 1./12. ));
+							if( userdata.Songs.size() )
+							{
+								userdata.BPM = userdata.Songs.front()->BPM * userdata.SourcePitchScale;
+								snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s (%.1f BPM)", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s", userdata.BPM );
+							}
+							else
+								snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
+						}
+						else
+						{
+							userdata.BPM += 1.;
+							snprintf( visualizer_message, 128, "Playback BPM: %.0f", userdata.BPM );
+						}
+						userdata.SetMessage( visualizer_message, 4 );
+					}
+					else if( (key == SDLK_KP_DIVIDE) || (key == SDLK_o) )
 					{
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale /= pow( 2., 1./12. );
@@ -2748,7 +2914,7 @@ int main( int argc, char **argv )
 							snprintf( visualizer_message, 128, "Pitch: %s%.0f semitone%s", (st >= 0.) ? "+" : "", st, ((int)(fabs(st)+0.5) == 1) ? "" : "s" );
 						userdata.SetMessage( visualizer_message, 4 );
 					}
-					else if( key == SDLK_QUOTE || key == SDLK_UP )
+					else if( (key == SDLK_KP_MULTIPLY) || (key == SDLK_p) )
 					{
 						userdata.SourceBPM = true;
 						userdata.SourcePitchScale *= pow( 2., 1./12. );
@@ -2768,6 +2934,32 @@ int main( int argc, char **argv )
 						float playback = userdata.SourceBPM ? source * userdata.SourcePitchScale : userdata.BPM;
 						snprintf( visualizer_message, 128, "Song %.1f BPM, Playback %.1f BPM", source, playback );
 						userdata.SetMessage( visualizer_message, 4 );
+					}
+					else if( key == SDLK_k )
+					{
+						if( userdata.Songs.size() )
+						{
+							Song *current_song = userdata.Songs.front();
+							if( shift )
+								current_song->BPM -= 0.1;
+							else
+								current_song->BPM = floor( current_song->BPM - 0.01 );
+							snprintf( visualizer_message, 128, "Adjusted Song BPM: %.1f", current_song->BPM );
+							userdata.SetMessage( visualizer_message, 4 );
+						}
+					}
+					else if( key == SDLK_l )
+					{
+						if( userdata.Songs.size() )
+						{
+							Song *current_song = userdata.Songs.front();
+							if( shift )
+								current_song->BPM += 0.1;
+							else
+								current_song->BPM = ceil( current_song->BPM + 0.01 );
+							snprintf( visualizer_message, 128, "Adjusted Song BPM: %.1f", current_song->BPM );
+							userdata.SetMessage( visualizer_message, 4 );
+						}
 					}
 					else if( (key == SDLK_x) || (key == SDLK_KP0) )
 					{
@@ -3709,6 +3901,54 @@ int main( int argc, char **argv )
 					result_str = this_slash + 1;
 				
 				font2.Draw( 2, y, result_str );
+			}
+			
+			if( SearchTerms.begin()->empty() && SearchResults.empty() )
+			{
+				if( userdata.Songs.size() )
+				{
+					for( std::deque<Song*>::const_iterator song = userdata.Songs.begin() + 1; song != userdata.Songs.end(); song ++ )
+					{
+						y += font2.CharH;
+						if( y > drawto->h )
+							break;
+						
+						const char *song_str = (*song)->Filename.c_str();
+						const char *this_slash = NULL;
+						while(( this_slash = strstr( song_str, PATH_SEPARATOR ) ))
+							song_str = this_slash + 1;
+						
+						font2.Draw( 2, y, song_str );
+					}
+				}
+				
+				if( userdata.Loader.KeepThis && ! userdata.Loader.Finished && ! userdata.Loader.Filename.empty() )
+				{
+					y += font2.CharH;
+					if( y > drawto->h )
+						break;
+					
+					const char *loading = userdata.Loader.Filename.c_str();
+					const char *this_slash = NULL;
+					while(( this_slash = strstr( loading, PATH_SEPARATOR ) ))
+						loading = this_slash + 1;
+					
+					font2.Draw( 2, y, loading );
+				}
+				
+				for( std::deque<std::string>::const_iterator queued = userdata.Queue.begin(); queued != userdata.Queue.end(); queued ++ )
+				{
+					y += font2.CharH;
+					if( y > drawto->h )
+						break;
+					
+					const char *queued_str = queued->c_str();
+					const char *this_slash = NULL;
+					while(( this_slash = strstr( queued_str, PATH_SEPARATOR ) ))
+						queued_str = this_slash + 1;
+					
+					font2.Draw( 2, y, queued_str );
+				}
 			}
 		}
 		

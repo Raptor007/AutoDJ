@@ -6,7 +6,7 @@ AudioFile::AudioFile( const char *filename, volatile bool *running_ptr )
 	Data = NULL;
 	Clear();
 	
-	if( filename && running_ptr )
+	if( filename )
 		Load( filename, running_ptr );
 }
 
@@ -21,6 +21,7 @@ void AudioFile::Clear( void )
 {
 	Allocated = 0;
 	Size = 0;
+	SamplesPerChannel = 0;
 	if( Data )
 		free( Data );
 	Data = NULL;
@@ -82,7 +83,7 @@ bool AudioFile::SetAllocation( size_t new_alloc )
 }
 
 
-bool AudioFile::AddData( uint8_t *add_data, size_t add_size )
+bool AudioFile::AddData( const uint8_t *add_data, size_t add_size )
 {
 	if( ! add_size )
 		return true;
@@ -141,7 +142,7 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 {
 	AVDictionaryEntry *tag = NULL;
 	
-	if( ! *running_ptr )
+	if( running_ptr && ! *running_ptr )
 		goto end;
 	
 	// open input file, and allocate format context
@@ -220,7 +221,7 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 		while( pkt.size > 0 );
 		av_packet_unref( &orig_pkt );
 		
-		if( ! *running_ptr )
+		if( running_ptr && ! *running_ptr )
 			goto end;
 	}
 	
@@ -231,7 +232,7 @@ bool AudioFile::Load( const char *filename, volatile bool *running_ptr )
 	{
 		DecodePacket();
 		
-		if( ! *running_ptr )
+		if( running_ptr && ! *running_ptr )
 			goto end;
 	}
 	while( got_frame );
@@ -258,7 +259,36 @@ end:
 	if( Size && ! SetAllocation( Size ) )
 		fprintf( stderr, "Couldn't shrink to %iMB buffer!\n", (int)(Size/(1024*1024)) );
 	
+	SamplesPerChannel = (Channels && BytesPerSample) ? (Size / (Channels * BytesPerSample)) : 0;
+	
 	return audio_stream;
+}
+
+
+bool AudioFile::Save( const char *filename ) const
+{
+	FILE *out = fopen( filename, "wb" );
+	if( ! out )
+		return false;
+	
+	size_t padded = Size + 36;
+	unsigned char wave_header[ 44 ] = { 'R','I','F','F', padded&0xFF,(padded/256)&0xFF,(padded/(256*256))&0xFF,(padded/(256*256*256))&0xFF, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, 1,0, Channels,0, SampleRate&0xFF,(SampleRate/256)%0xFF,(SampleRate/(256*256))%0xFF,(SampleRate/(256*256*256))%0xFF, (SampleRate*Channels*BytesPerSample)&0xFF,(SampleRate*Channels*BytesPerSample/256)&0xFF,(SampleRate*Channels*BytesPerSample/(256*256))&0xFF,(SampleRate*Channels*BytesPerSample/(256*256*256))&0xFF, Channels*BytesPerSample,0, BytesPerSample*8,0, 'd','a','t','a', Size&0xFF,(Size/256)&0xFF,(Size/(256*256))&0xFF,(Size/(256*256*256))&0xFF };
+	fwrite( wave_header, 1, 44, out );
+	
+	// FIXME
+	//if( Endian::Little() )
+		fwrite( Data, 1, Size, out );
+	/*
+	else
+	{
+		fwrite( Data, 1, Size, out );
+	}
+	*/
+	
+	fflush( out );
+	fclose( out );
+	
+	return true;
 }
 
 

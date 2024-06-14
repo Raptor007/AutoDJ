@@ -2060,6 +2060,23 @@ int main( int argc, char **argv )
 		}
 	}
 	
+#ifdef WIN32
+	/*
+	if( paths.size() )
+	{
+		HWND other_copy_running = FindWindow( NULL, "Raptor007's AutoDJ" );
+		if( other_copy_running )
+		{
+			if( ! IsWindowVisible(other_copy_running) )
+				ShowWindow( other_copy_running, SW_SHOW );
+			SetForegroundWindow( other_copy_running );
+			// FIXME: Somehow send our paths to the other process, then quit.
+			// Maybe this? https://learn.microsoft.com/en-us/windows/win32/memory/creating-named-shared-memory?redirectedfrom=MSDN
+		}
+	}
+	*/
+#endif
+	
 	if( ! paths.size() )
 	{
 		// If no music was dropped onto the icon or specified on the command-line, use default paths.
@@ -2261,6 +2278,7 @@ int main( int argc, char **argv )
 		#define MIN_EQ 0.
 		#define MAX_EQ 0.
 		disabled_eq->FreqScale[ MIN_EQ ] = 1.;
+		disabled_eq->FreqScale[    16. ] = 1.;
 		disabled_eq->FreqScale[    32. ] = 1.;
 		disabled_eq->FreqScale[    64. ] = 1.;
 		disabled_eq->FreqScale[   125. ] = 1.;
@@ -2271,6 +2289,7 @@ int main( int argc, char **argv )
 		disabled_eq->FreqScale[  4000. ] = 1.;
 		disabled_eq->FreqScale[  8000. ] = 1.;
 		disabled_eq->FreqScale[ 16000. ] = 1.;
+		disabled_eq->FreqScale[ 20000. ] = 1.;
 		disabled_eq->FreqScale[ MAX_EQ ] = 1.;
 	}
 	
@@ -2291,7 +2310,7 @@ int main( int argc, char **argv )
 	size_t visualizer_loading_frame = 0;
 	double visualizer_hue = 0.;
 	int visualizer_color_cycle = 16;
-	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 3, 3, 2, 3, 1 };
+	int visualizer_backgrounds[ VISUALIZERS ] = { 0, 3, 4, 2, 3, 1 };
 	int visualizer_frames = userdata.VisualizerBufferSize / (userdata.Spec.channels * bytes_per_sample);
 	int visualizer_fft_frames = std::min<int>( visualizer_frames, 1 << (int) log2(userdata.Spec.freq * 0.095 / 4.) );
 	FFTContext *visualizer_fft_context = av_fft_init( log2(visualizer_fft_frames), false );
@@ -3099,61 +3118,22 @@ int main( int argc, char **argv )
 							
 							if( shift || was_flat )
 							{
-								const char *preset = "Flat";
-								bool earbud_eq = false;
-								bool room_eq = false;
-								if( was_flat && userdata.Reverb )
-								{
-									preset = "Room";
-									room_eq = true;
-								}
-								else if( was_flat )
-								{
-									preset = "Earbuds";
-									earbud_eq = true;
-								}
-								
+								const char *preset = was_flat ? "Bass Boost" : "Flat";
 								userdata.EQ->FreqScale.clear();
 								userdata.EQ->FreqScale[ MIN_EQ ] = 1.;
-								userdata.EQ->FreqScale[    32. ] = 1.;
-								userdata.EQ->FreqScale[    64. ] = earbud_eq ? pow( 2.,  1./6. ) : 1.;
-								userdata.EQ->FreqScale[   125. ] = earbud_eq ? pow( 2.,  1./6. ) : 1.;
+								userdata.EQ->FreqScale[    16. ] = was_flat ? pow( 2.,  3./6. ): 1.;
+								userdata.EQ->FreqScale[    32. ] = was_flat ? pow( 2.,  3./6. ): 1.;
+								userdata.EQ->FreqScale[    64. ] = was_flat ? pow( 2.,  2./6. ): 1.;
+								userdata.EQ->FreqScale[   125. ] = was_flat ? pow( 2.,  1./6. ): 1.;
 								userdata.EQ->FreqScale[   250. ] = 1.;
 								userdata.EQ->FreqScale[   500. ] = 1.;
 								userdata.EQ->FreqScale[  1000. ] = 1.;
 								userdata.EQ->FreqScale[  2000. ] = 1.;
-								userdata.EQ->FreqScale[  4000. ] = earbud_eq ? pow( 2., -1./6. ) : 1.;
-								userdata.EQ->FreqScale[  8000. ] = earbud_eq ? pow( 2., -2./6. ) : 1.;
-								userdata.EQ->FreqScale[ 16000. ] = earbud_eq ? pow( 2., -1./6. ) : 1.;
+								userdata.EQ->FreqScale[  4000. ] = 1.;
+								userdata.EQ->FreqScale[  8000. ] = 1.;
+								userdata.EQ->FreqScale[ 16000. ] = 1.;
+								userdata.EQ->FreqScale[ 20000. ] = 1.;
 								userdata.EQ->FreqScale[ MAX_EQ ] = 1.;
-								
-								if( room_eq )
-								{
-									for( std::vector<ReverbBounce>::const_iterator bounce = userdata.Reverb->SameSide.begin(); bounce != userdata.Reverb->SameSide.end(); bounce ++ )
-									{
-										float freq = userdata.Spec.freq / (float) bounce->FramesBack;
-										for( float multiple = 1; (freq * multiple) < 20000.; multiple ++ )
-										{
-											float res_freq = freq * multiple;
-											float bin = userdata.EQ->FreqScale.rbegin()->first; // 16KHz
-											std::map<float,float>::const_iterator found = userdata.EQ->FreqScale.lower_bound( res_freq );
-											if( found != userdata.EQ->FreqScale.end() )
-											{
-												bin = userdata.EQ->FreqScale.begin()->first; // 32Hz
-												if( found != userdata.EQ->FreqScale.begin() )
-												{
-													std::map<float,float>::const_iterator prev = found;
-													prev --;
-													float b_part = (res_freq - prev->first) / (found->first - prev->first);
-													bin = (b_part < 0.5f) ? prev->first : found->first;
-												}
-											}
-											float scale = userdata.EQ->GetScale( bin );
-											userdata.EQ->FreqScale[ bin ] = std::min<float>( scale, 1. / (1. + bounce->AmpScale) );
-										}
-									}
-								}
-								
 								snprintf( visualizer_message, 128, "Equalizer: %s", preset );
 							}
 							else
@@ -3175,6 +3155,7 @@ int main( int argc, char **argv )
 							userdata.EQ = disabled_eq;
 						
 						float scale = userdata.EQ->GetScale( 32. ) * pow( 2., shift ? -1./6. : 1./6. );
+						userdata.EQ->FreqScale[ 16. ] = scale;
 						userdata.EQ->FreqScale[ 32. ] = scale;
 						float db = 6. * log2(scale);
 						
@@ -3284,6 +3265,7 @@ int main( int argc, char **argv )
 						
 						float scale = userdata.EQ->GetScale( 16000. ) * pow( 2., shift ? -1./6. : 1./6. );
 						userdata.EQ->FreqScale[ 16000. ] = scale;
+						userdata.EQ->FreqScale[ 20000. ] = scale;
 						float db = 6. * log2(scale);
 						
 						snprintf( visualizer_message, 128, "Equalizer: 16KHz %s%.0fdB", (db >= 0.) ? "+" : "", db );

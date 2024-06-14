@@ -39,6 +39,8 @@ private:
 public:
 	unsigned int Channels, Rate;
 	size_t Frames;
+	size_t BufferSize;
+	float *InputCopy;
 	
 	EqualizerFFT( unsigned int channels, unsigned int rate, size_t frames );
 	~EqualizerFFT();

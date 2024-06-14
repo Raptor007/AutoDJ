@@ -117,9 +117,12 @@ EqualizerFFT::EqualizerFFT( unsigned int channels, unsigned int rate, size_t fra
 	Channels = channels;
 	Rate = rate;
 	Frames = frames;
-	Context1 = av_fft_init( log2(Frames), false );
-	Context2 = av_fft_init( log2(Frames), true );
+	Context1 = av_fft_init( log2(Frames), false );  // Perform the forward transform.
+	Context2 = av_fft_init( log2(Frames), true );   // Perform the inverse transform.
 	Complex = (FFTComplex*) av_mallocz( Frames * sizeof(FFTComplex) );
+	
+	BufferSize = Channels * Frames * sizeof(float*);
+	InputCopy = (float*) malloc( BufferSize );
 }
 
 
@@ -128,16 +131,27 @@ EqualizerFFT::~EqualizerFFT()
 	av_fft_end( Context1 );
 	av_fft_end( Context2 );
 	av_free( Complex );
+	
+	free( InputCopy );
+	InputCopy = NULL;
 }
 
 
 void EqualizerFFT::Process( float *buffer, EqualizerParam *param )
 {
+	if( ! param )
+		return;
+	
+	memcpy( InputCopy, buffer, BufferSize );
+	float scale0 = param->GetScale(0.f);
+	float scaleH = param->GetScale( Frames / 2, Frames, Rate );
+	float new_scale = 1.f / Frames;
+	
 	for( size_t ch = 0; ch < Channels; ch ++ )
 	{
 		memset( Complex, 0, Frames * sizeof(FFTComplex) );
 		for( size_t i = 0; i < Frames; i ++ )
-			Complex[ i ].re = buffer[ (i * Channels) + ch ];
+			Complex[ i ].re = InputCopy[ (i * Channels) + ch ];
 		av_fft_permute( Context1, Complex );
 		av_fft_calc( Context1, Complex );
 		
@@ -151,30 +165,28 @@ void EqualizerFFT::Process( float *buffer, EqualizerParam *param )
 			Complex[ Frames - i ].im *= scale;
 		}
 		
-		float scale0 = param->GetScale(0.f);
 		Complex[ 0 ].re *= scale0;
 		Complex[ 0 ].im *= scale0;
-		float scaleH = param->GetScale( Frames / 2, Frames, Rate );
 		Complex[ Frames / 2 ].re *= scaleH;
 		Complex[ Frames / 2 ].im *= scaleH;
 		
 		av_fft_permute( Context2, Complex );
 		av_fft_calc( Context2, Complex );
 		
-		#define EQ_ANTIPOP (Rate / 500)  // 2ms each end = 88 samples each end at 44.1KHz
-		float new_scale = 1.f / Frames;
-		
-		for( size_t i = EQ_ANTIPOP; i < Frames - EQ_ANTIPOP; i ++ )
+		for( size_t i = 0; i < Frames; i ++ )
 			buffer[ (i * Channels) + ch ] = Complex[ i ].re * new_scale;
 		
+		#define EQ_ANTIPOP (Rate / 500)  // 2ms each end = 88 samples each end at 44.1KHz
+		#ifdef EQ_ANTIPOP
 		size_t end_antipop = std::min<size_t>( Frames / 2, EQ_ANTIPOP );
 		for( size_t i = 0; i < end_antipop; i ++ )
 		{
 			float new_part = i / (float) EQ_ANTIPOP;
-			buffer[ (i * Channels) + ch ] = new_part * Complex[ i ].re * new_scale + (1.f - new_part) * scale0 * buffer[ (i * Channels) + ch ];
+			buffer[ (i * Channels) + ch ] = new_part * Complex[ i ].re * new_scale + (1.f - new_part) * scale0 * InputCopy[ (i * Channels) + ch ];
 			size_t j = Frames - 1 - i;
-			buffer[ (j * Channels) + ch ] = new_part * Complex[ j ].re * new_scale + (1.f - new_part) * scale0 * buffer[ (j * Channels) + ch ];
+			buffer[ (j * Channels) + ch ] = new_part * Complex[ j ].re * new_scale + (1.f - new_part) * scale0 * InputCopy[ (j * Channels) + ch ];
 		}
+		#endif
 	}
 }
 
@@ -203,12 +215,9 @@ void Equalizer::Process( float *buffer, unsigned int channels, unsigned int rate
 	}
 #endif
 	
-	if( param )
-	{
-		// NOTE: We can do this because our audio output never changes rate/channels.
-		if( EqualizerFFTs.find(frames) == EqualizerFFTs.end() )
-			EqualizerFFTs[ frames ] = new EqualizerFFT( channels, rate, frames );
-		
-		EqualizerFFTs[ frames ]->Process( buffer, param );
-	}
+	// NOTE: We can do this because our audio output never changes rate/channels.
+	if( EqualizerFFTs.find(frames) == EqualizerFFTs.end() )
+		EqualizerFFTs[ frames ] = new EqualizerFFT( channels, rate, frames );
+	
+	EqualizerFFTs[ frames ]->Process( buffer, param );
 }

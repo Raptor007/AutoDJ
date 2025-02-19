@@ -1832,6 +1832,236 @@ SDL_Surface *NewDrawTo( SDL_Surface *screen, int zoom )
 }
 
 
+void FadeBackground( const SDL_Surface *drawfrom, SDL_Surface *drawto, int style, int x0, int xend, int y0, int yend )
+{
+	// NOTE: This currently assumes the destination surface has already been locked!
+	// WARNING: It also assumes drawfrom and drawto are the same resolution!
+	
+	if( ! (drawfrom && drawto) )
+		return;
+	
+	Uint32* pixels = (Uint32*) drawto->pixels;
+	
+	#define FADE_R(r,g,b) (std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ))
+	#define FADE_G(r,g,b) (std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ))
+	#define FADE_B(r,g,b) (std::min<int>( 0xFF, b * 0.9375f ))
+	
+	if( style == 0 )
+	{
+		// Fade in-place.
+		for( int x = x0; x < xend; x ++ )
+		{
+			for( int y = y0; y < yend; y ++ )
+			{
+				Uint8 r = 0x00, g = 0x00, b = 0x00;
+				SDL_GetRGB( pixels[ y * drawfrom->w + x ], drawfrom->format, &r, &g, &b );
+				pixels[ y * drawto->w + x ] = SDL_MapRGB( drawto->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+			}
+		}
+	}
+	else if( style == 1 )
+	{
+		// Fade downward.
+		for( int x = x0; x < xend; x ++ )
+		{
+			Uint8 r = 0x00, g = 0x00, b = 0x00;
+			for( int y = yend - 1; y >= (y0 + 1); y -- )  // FIXME
+			{
+				Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00;
+				SDL_GetRGB( pixels[  y    * drawfrom->w + x ], drawfrom->format, &r1, &g1, &b1 );
+				SDL_GetRGB( pixels[ (y-1) * drawfrom->w + x ], drawfrom->format, &r2, &g2, &b2 );
+				r = std::max<Uint8>( r1, r2 );
+				g = std::max<Uint8>( g1, g2 );
+				b = std::max<Uint8>( b1, b2 );
+				pixels[ y * drawto->w + x ] = SDL_MapRGB( drawto->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+			}
+			SDL_GetRGB( pixels[ x ], drawfrom->format, &r, &g, &b );
+			pixels[ x ] = SDL_MapRGB( drawto->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+		}
+	}
+	else if( style == 2 )
+	{
+		// Fade outward.
+		for( int x = x0; x < (xend + 1) / 2; x ++ )
+		{
+			Uint8 r = 0x00, g = 0x00, b = 0x00;
+			for( int y = y0; y < (yend + 1) / 2; y ++ )  // FIXME
+			{
+				for( int q = 0; q < 4; q ++ )
+				{
+					int x1 = x, y1 = y, dx = 1, dy = 1;
+					if( q >= 2 )
+					{
+						x1 = drawto->w - x - 1;
+						dx = -1;
+					}
+					if( q % 2 )
+					{
+						y1 = drawto->h - y - 1;
+						dy = -1;
+					}
+					Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00;
+					SDL_GetRGB( pixels[  y1     * drawfrom->w + x1    ], drawfrom->format, &r1, &g1, &b1 );
+					SDL_GetRGB( pixels[ (y1+dy) * drawfrom->w + x1+dx ], drawfrom->format, &r2, &g2, &b2 );
+					r = std::max<Uint8>( r1, r2 );
+					g = std::max<Uint8>( g1, g2 );
+					b = std::max<Uint8>( b1, b2 );
+					pixels[ y1 * drawto->w + x1 ] = SDL_MapRGB( drawto->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+				}
+			}
+		}
+	}
+	else if( style == 3 )
+	{
+		// Fade in all directions.
+		Uint8 r = 0x00, g = 0x00, b = 0x00;
+		Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00, r3 = 0x00, g3 = 0x00, b3 = 0x00;
+		for( int y = y0; y < yend; y ++ )
+		{
+			r2 = 0x00; g2 = 0x00; b2 = 0x00;
+			SDL_GetRGB( pixels[ y * drawfrom->w ], drawfrom->format, &r3, &g3, &b3 );
+			for( int x = x0; x < xend; x ++ )
+			{
+				r1 = r2; g1 = g2; b1 = b2;
+				r2 = r3; g2 = g3; b2 = b3;
+				if( x + 1 < xend )
+					SDL_GetRGB( pixels[ y * drawto->w + (x+1) ], drawto->format, &r3, &g3, &b3 );
+				else
+					{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
+				r = std::max<Uint8>( std::max<Uint8>( FADE_R(r1,g1,b1), r2 ), FADE_R(r3,g3,b3) );
+				g = std::max<Uint8>( std::max<Uint8>( FADE_G(r1,g1,b1), g2 ), FADE_G(r3,g3,b3) );
+				b = std::max<Uint8>( std::max<Uint8>( FADE_B(r1,g1,b1), b2 ), FADE_B(r3,g3,b3) );
+				pixels[ y * drawto->w + x ] = SDL_MapRGB( drawto->format, r, g, b );
+			}
+		}
+		for( int x = x0; x < xend; x ++ )
+		{
+			r2 = 0x00; g2 = 0x00; b2 = 0x00;
+			SDL_GetRGB( pixels[ x ], drawfrom->format, &r3, &g3, &b3 );
+			for( int y = y0; y < yend; y ++ )
+			{
+				r1 = r2; g1 = g2; b1 = b2;
+				r2 = r3; g2 = g3; b2 = b3;
+				if( y + 1 < yend )
+					SDL_GetRGB( pixels[ (y+1) * drawto->w + x ], drawto->format, &r3, &g3, &b3 );
+				else
+					{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
+				r = std::max<Uint8>( std::max<Uint8>( r1, r2 ), r3 );
+				g = std::max<Uint8>( std::max<Uint8>( g1, g2 ), g3 );
+				b = std::max<Uint8>( std::max<Uint8>( b1, b2 ), b3 );
+				pixels[ y * drawto->w + x ] = SDL_MapRGB( drawto->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
+			}
+		}
+	}
+	else if( style == 4 )
+	{
+		// Prismatic fade.
+		Uint8 r = 0x00, g = 0x00, b = 0x00;
+		Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00, r3 = 0x00, g3 = 0x00, b3 = 0x00;
+		for( int y = y0; y < yend; y ++ )
+		{
+			r2 = 0x00; g2 = 0x00; b2 = 0x00;
+			SDL_GetRGB( pixels[ y * drawfrom->w ], drawfrom->format, &r3, &g3, &b3 );
+			for( int x = x0; x < xend; x ++ )
+			{
+				r1 = r2; g1 = g2; b1 = b2;
+				r2 = r3; g2 = g3; b2 = b3;
+				if( x + 1 < xend )
+					SDL_GetRGB( pixels[ y * drawfrom->w + (x+1) ], drawfrom->format, &r3, &g3, &b3 );
+				else
+					{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
+				r = std::max<Uint8>( std::max<Uint8>( r1*0.22f, r2       ), r3*0.22f );
+				g = std::max<Uint8>( std::max<Uint8>( g1*0.55f, g2*0.92f ), g3*0.55f );
+				b = std::max<Uint8>( std::max<Uint8>( b1*0.33f, b2       ), b3*0.33f );
+				pixels[ y * drawto->w + x ] = SDL_MapRGB( drawto->format, r, g, b );
+			}
+		}
+		for( int x = x0; x < xend; x ++ )
+		{
+			r2 = 0x00; g2 = 0x00; b2 = 0x00;
+			SDL_GetRGB( pixels[ x ], drawfrom->format, &r3, &g3, &b3 );
+			for( int y = y0; y < yend; y ++ )
+			{
+				r1 = r2; g1 = g2; b1 = b2;
+				r2 = r3; g2 = g3; b2 = b3;
+				if( y + 1 < yend )
+					SDL_GetRGB( pixels[ (y+1) * drawfrom->w + x ], drawfrom->format, &r3, &g3, &b3 );
+				else
+					{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
+				r = std::max<Uint8>( r3*0.97f, r2*0.22f );
+				g = g2;
+				b = std::max<Uint8>( b1*0.98f, b2*0.33f );
+				pixels[ y * drawto->w + x ] = SDL_MapRGB( drawto->format, r, g, b );
+			}
+		}
+	}
+}
+
+
+class FadeBackgroundData
+{
+public:
+	const SDL_Surface *drawfrom;
+	SDL_Surface *drawto;
+	int style, x0, xend, y0, yend;
+};
+
+
+int FadeBackgroundThread( void *data )
+{
+	FadeBackgroundData *fbd = (FadeBackgroundData*) data;
+	FadeBackground( fbd->drawfrom, fbd->drawto, fbd->style, fbd->x0, fbd->xend, fbd->y0, fbd->yend );
+	return 0;
+}
+
+
+void FadeBackground( const SDL_Surface *drawfrom, SDL_Surface *drawto, int style, bool threading = true )
+{
+	if( (style == 2) || (style == 4) || ! threading )
+		FadeBackground( drawfrom, drawto, style, 0, drawto->w, 0, drawto->h );
+	else if( style == 3 )
+	{
+		FadeBackgroundData data;
+		data.drawfrom = drawfrom;
+		data.drawto   = drawto;
+		data.style    = style;
+		data.x0       = 0;
+		data.xend     = drawto->w;
+		data.y0       = 0;
+		data.yend     = drawto->h / 2 + 1;
+		SDL_Thread *thread = SDL_CreateThread( &FadeBackgroundThread, &data );
+		if( thread )
+		{
+			FadeBackground( drawfrom, drawto, style, 0, drawto->w, drawto->h / 2, drawto->h );
+			int unused = 0;
+			SDL_WaitThread( thread, &unused );
+		}
+		else
+			FadeBackground( drawfrom, drawto, style, 0, drawto->w, 0, drawto->h );
+	}
+	else
+	{
+		FadeBackgroundData data;
+		data.drawfrom = drawfrom;
+		data.drawto   = drawto;
+		data.style    = style;
+		data.x0       = 0;
+		data.xend     = drawto->w / 2;
+		data.y0       = 0;
+		data.yend     = drawto->h;
+		SDL_Thread *thread = SDL_CreateThread( &FadeBackgroundThread, &data );
+		if( thread )
+		{
+			FadeBackground( drawfrom, drawto, style, drawto->w / 2, drawto->w, 0, drawto->h );
+			int unused = 0;
+			SDL_WaitThread( thread, &unused );
+		}
+		else
+			FadeBackground( drawfrom, drawto, style, 0, drawto->w, 0, drawto->h );
+	}
+}
+
+
 // --------------------------------------------------------------------------------------
 
 
@@ -2638,7 +2868,7 @@ int main( int argc, char **argv )
 								SDL_FreeSurface( drawto );
 							SDL_FreeSurface( screen );
 							screen = SDL_SetVideoMode( window_w, window_h, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
-							drawto = screen;
+							drawto = (zoom == 1) ? screen : NewDrawTo( screen, zoom );
 							fullscreen = false;
 						}
 						else if( resize && ! shift )
@@ -2650,6 +2880,8 @@ int main( int argc, char **argv )
 							if( fullscreen_w && fullscreen_h )
 								screen = SDL_SetVideoMode( fullscreen_w, fullscreen_h, 0, SDL_SWSURFACE | SDL_FULLSCREEN );
 							if( ! screen )
+								screen = SDL_SetVideoMode( 0, 0, 0, SDL_SWSURFACE | SDL_FULLSCREEN );
+							if( ! screen )
 								screen = SDL_SetVideoMode( 1920, 1080, 0, SDL_SWSURFACE | SDL_FULLSCREEN );
 							if( ! screen )
 								screen = SDL_SetVideoMode( 640, 480, 0, SDL_SWSURFACE | SDL_FULLSCREEN );
@@ -2660,8 +2892,10 @@ int main( int argc, char **argv )
 							}
 							else
 								screen = SDL_SetVideoMode( window_w, window_h, 0, SDL_SWSURFACE | (resize ? SDL_RESIZABLE : 0) );
-							drawto = screen;
+							drawto = (zoom == 1) ? screen : NewDrawTo( screen, zoom );
 							fullscreen = true;
+							if( visualizer == 2 )
+								visualizer = 1;
 						}
 						else
 						{
@@ -2992,9 +3226,9 @@ int main( int argc, char **argv )
 						}
 						else
 						{
-							userdata.CrossfadeOut = 128;
+							userdata.CrossfadeOut = shift ? 64 : 128;
 							if( ! userdata.CrossfadeIn )
-								userdata.CrossfadeIn = 96;
+								userdata.CrossfadeIn = shift ? 64 : 96;
 							int beats = std::min<int>( userdata.CrossfadeIn, userdata.CrossfadeOut );
 							snprintf( visualizer_message, 128, "Crossfade: %i Beat%s", beats, (beats == 1) ? "" : "s" );
 						}
@@ -3375,159 +3609,7 @@ int main( int argc, char **argv )
 			font1.SetTarget( pixels, drawto->w, drawto->h );
 			font2.SetTarget( pixels, drawto->w, drawto->h );
 			
-			#define FADE_R(r,g,b) (std::max<int>( 0, std::min<int>( 0xFF, (r - b) * 0.875f ) ))
-			#define FADE_G(r,g,b) (std::min<int>( 0xFF, g * 0.5f + std::max<float>( 0.f, (g - r - b) * 0.25f ) ))
-			#define FADE_B(r,g,b) (std::min<int>( 0xFF, b * 0.9375f ))
-			
-			if( (visualizer_backgrounds[ visualizer ] == 0) || ! userdata.Playing )
-			{
-				// Fade in-place.
-				for( int x = 0; x < drawto->w; x ++ )
-				{
-					for( int y = 0; y < drawto->h; y ++ )
-					{
-						Uint8 r = 0x00, g = 0x00, b = 0x00;
-						SDL_GetRGB( pixels[ y * drawto->w + x ], screen->format, &r, &g, &b );
-						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
-					}
-				}
-			}
-			else if( visualizer_backgrounds[ visualizer ] == 1 )
-			{
-				// Fade downward.
-				for( int x = 0; x < drawto->w; x ++ )
-				{
-					Uint8 r = 0x00, g = 0x00, b = 0x00;
-					for( int y = drawto->h - 1; y >= 1; y -- )
-					{
-						Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00;
-						SDL_GetRGB( pixels[  y    * drawto->w + x ], screen->format, &r1, &g1, &b1 );
-						SDL_GetRGB( pixels[ (y-1) * drawto->w + x ], screen->format, &r2, &g2, &b2 );
-						r = std::max<Uint8>( r1, r2 );
-						g = std::max<Uint8>( g1, g2 );
-						b = std::max<Uint8>( b1, b2 );
-						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
-					}
-					SDL_GetRGB( pixels[ x ], screen->format, &r, &g, &b );
-					pixels[ x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
-				}
-			}
-			else if( visualizer_backgrounds[ visualizer ] == 2 )
-			{
-				// Fade outward.
-				for( int x = 0; x < (drawto->w + 1) / 2; x ++ )
-				{
-					Uint8 r = 0x00, g = 0x00, b = 0x00;
-					for( int y = 0; y < (drawto->h + 1) / 2; y ++ )
-					{
-						for( int q = 0; q < 4; q ++ )
-						{
-							int x1 = x, y1 = y, dx = 1, dy = 1;
-							if( q >= 2 )
-							{
-								x1 = drawto->w - x - 1;
-								dx = -1;
-							}
-							if( q % 2 )
-							{
-								y1 = drawto->h - y - 1;
-								dy = -1;
-							}
-							Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00;
-							SDL_GetRGB( pixels[  y1     * drawto->w + x1    ], screen->format, &r1, &g1, &b1 );
-							SDL_GetRGB( pixels[ (y1+dy) * drawto->w + x1+dx ], screen->format, &r2, &g2, &b2 );
-							r = std::max<Uint8>( r1, r2 );
-							g = std::max<Uint8>( g1, g2 );
-							b = std::max<Uint8>( b1, b2 );
-							pixels[ y1 * drawto->w + x1 ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
-						}
-					}
-				}
-			}
-			else if( visualizer_backgrounds[ visualizer ] == 3 )
-			{
-				// Fade in all directions.
-				Uint8 r = 0x00, g = 0x00, b = 0x00;
-				Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00, r3 = 0x00, g3 = 0x00, b3 = 0x00;
-				for( int y = 0; y < drawto->h; y ++ )
-				{
-					r2 = 0x00; g2 = 0x00; b2 = 0x00;
-					SDL_GetRGB( pixels[ y * drawto->w ], screen->format, &r3, &g3, &b3 );
-					for( int x = 0; x < drawto->w; x ++ )
-					{
-						r1 = r2; g1 = g2; b1 = b2;
-						r2 = r3; g2 = g3; b2 = b3;
-						if( x + 1 < drawto->w )
-							SDL_GetRGB( pixels[ y * drawto->w + (x+1) ], screen->format, &r3, &g3, &b3 );
-						else
-							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
-						r = std::max<Uint8>( std::max<Uint8>( FADE_R(r1,g1,b1), r2 ), FADE_R(r3,g3,b3) );
-						g = std::max<Uint8>( std::max<Uint8>( FADE_G(r1,g1,b1), g2 ), FADE_G(r3,g3,b3) );
-						b = std::max<Uint8>( std::max<Uint8>( FADE_B(r1,g1,b1), b2 ), FADE_B(r3,g3,b3) );
-						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, r, g, b );
-					}
-				}
-				for( int x = 0; x < drawto->w; x ++ )
-				{
-					r2 = 0x00; g2 = 0x00; b2 = 0x00;
-					SDL_GetRGB( pixels[ x ], screen->format, &r3, &g3, &b3 );
-					for( int y = 0; y < drawto->h; y ++ )
-					{
-						r1 = r2; g1 = g2; b1 = b2;
-						r2 = r3; g2 = g3; b2 = b3;
-						if( y + 1 < drawto->h )
-							SDL_GetRGB( pixels[ (y+1) * drawto->w + x ], screen->format, &r3, &g3, &b3 );
-						else
-							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
-						r = std::max<Uint8>( std::max<Uint8>( r1, r2 ), r3 );
-						g = std::max<Uint8>( std::max<Uint8>( g1, g2 ), g3 );
-						b = std::max<Uint8>( std::max<Uint8>( b1, b2 ), b3 );
-						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, FADE_R(r,g,b), FADE_G(r,g,b), FADE_B(r,g,b) );
-					}
-				}
-			}
-			else if( visualizer_backgrounds[ visualizer ] == 4 )
-			{
-				// Prismatic fade.
-				Uint8 r = 0x00, g = 0x00, b = 0x00;
-				Uint8 r1 = 0x00, g1 = 0x00, b1 = 0x00, r2 = 0x00, g2 = 0x00, b2 = 0x00, r3 = 0x00, g3 = 0x00, b3 = 0x00;
-				for( int y = 0; y < drawto->h; y ++ )
-				{
-					r2 = 0x00; g2 = 0x00; b2 = 0x00;
-					SDL_GetRGB( pixels[ y * drawto->w ], screen->format, &r3, &g3, &b3 );
-					for( int x = 0; x < drawto->w; x ++ )
-					{
-						r1 = r2; g1 = g2; b1 = b2;
-						r2 = r3; g2 = g3; b2 = b3;
-						if( x + 1 < drawto->w )
-							SDL_GetRGB( pixels[ y * drawto->w + (x+1) ], screen->format, &r3, &g3, &b3 );
-						else
-							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
-						r = std::max<Uint8>( std::max<Uint8>( r1*0.22f, r2       ), r3*0.22f );
-						g = std::max<Uint8>( std::max<Uint8>( g1*0.55f, g2*0.92f ), g3*0.55f );
-						b = std::max<Uint8>( std::max<Uint8>( b1*0.33f, b2       ), b3*0.33f );
-						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, r, g, b );
-					}
-				}
-				for( int x = 0; x < drawto->w; x ++ )
-				{
-					r2 = 0x00; g2 = 0x00; b2 = 0x00;
-					SDL_GetRGB( pixels[ x ], screen->format, &r3, &g3, &b3 );
-					for( int y = 0; y < drawto->h; y ++ )
-					{
-						r1 = r2; g1 = g2; b1 = b2;
-						r2 = r3; g2 = g3; b2 = b3;
-						if( y + 1 < drawto->h )
-							SDL_GetRGB( pixels[ (y+1) * drawto->w + x ], screen->format, &r3, &g3, &b3 );
-						else
-							{ r3 = 0x00; g3 = 0x00; b3 = 0x00; }
-						r = std::max<Uint8>( r3*0.97f, r2*0.22f );
-						g = g2;
-						b = std::max<Uint8>( b1*0.98f, b2*0.33f );
-						pixels[ y * drawto->w + x ] = SDL_MapRGB( screen->format, r, g, b );
-					}
-				}
-			}
+			FadeBackground( drawto, drawto, userdata.Playing ? visualizer_backgrounds[ visualizer ] : 0 );
 			
 			if( ! userdata.Playing )
 			{

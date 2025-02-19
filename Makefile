@@ -77,7 +77,7 @@ FontBin.o: FontBin.s Font1.bmp Font2.bmp
 	$(CC) $(CFLAGS) -g -c $< -o $@
 
 autodj AutoDJ AutoDJ.exe: $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(MISC_OBJ)
-	$(CC) $(CFLAGS) $^ $(LIBRARIES) $(FRAMEWORKS) -o $@
+	$(CC) $(CFLAGS) -g $^ $(LIBRARIES) $(FRAMEWORKS) -o $@
 	chmod ugo+rx $@
 
 %.o: %.cpp $(wildcard *.h)
